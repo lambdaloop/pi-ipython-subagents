@@ -1,0 +1,201 @@
+import { Key, matchesKey, ScrollView, Text, VStack } from "@earendil-works/pi-tui";
+const SUBAGENTS_WIDGET = "pi-rlm-runtime-subagents";
+const MAX_VISIBLE_SUBAGENTS = 12;
+class PreservingScrollView extends ScrollView {
+    updateLayout(contentHeight, viewportHeight, requestRender) {
+        const preserveManualPosition = !this.isFollowingEnd;
+        const previousScrollTop = this.scrollTop;
+        super.updateLayout(contentHeight, viewportHeight, requestRender);
+        if (preserveManualPosition && this.isFollowingEnd) {
+            this.scrollTo(previousScrollTop, { disableFollow: true });
+        }
+    }
+}
+export function subagentTreeView(subagents, limit = MAX_VISIBLE_SUBAGENTS) {
+    const rows = [];
+    let running = 0;
+    let total = 0;
+    const visit = (siblings, ancestors) => {
+        for (const [index, subagent] of siblings.entries()) {
+            const last = index === siblings.length - 1;
+            total++;
+            if (subagent.status === "running")
+                running++;
+            if (rows.length < limit) {
+                const indentation = ancestors.map((ancestorWasLast) => (ancestorWasLast ? "   " : "│  ")).join("");
+                rows.push({ prefix: `${indentation}${last ? "└─" : "├─"} `, subagent });
+            }
+            visit(subagent.subagents, [...ancestors, last]);
+        }
+    };
+    visit(subagents, []);
+    return { rows, running, total };
+}
+class SubagentBrowser extends VStack {
+    constructor(tui, theme, name, runtime, done) {
+        const transcript = new Text("", 1, 0);
+        const scroll = new PreservingScrollView(transcript, {
+            follow: "end",
+            primary: true,
+            overscroll: "contain",
+            scrollbar: "always",
+        });
+        const header = new Text("", 1, 0);
+        const footer = new Text("", 1, 0);
+        super([
+            { component: header, basis: 1, grow: 0, shrink: 0, minSize: 1 },
+            { component: scroll, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+            { component: footer, basis: 1, grow: 0, shrink: 0, minSize: 1 },
+        ]);
+        this.tui = tui;
+        this.theme = theme;
+        this.name = name;
+        this.runtime = runtime;
+        this.done = done;
+        this.transcript = transcript;
+        this.scroll = scroll;
+        this.header = header;
+        this.footer = footer;
+        this.closed = false;
+        this.refresh = () => {
+            if (this.closed)
+                return;
+            try {
+                const body = runtime.subagentTranscript(name);
+                const status = runtime.listSubagents().find((agent) => agent.name === name)?.status ?? "unknown";
+                const atBottom = scroll.isFollowingEnd;
+                header.setText(theme.fg("accent", `RLM sub-agent · ${name} · ${status}`));
+                transcript.setText(body);
+                footer.setText(theme.fg("muted", `↑/↓ scroll · PgUp/PgDn page · Home/End jump · q/Esc close${atBottom ? " · following latest" : " · paused"}`));
+            }
+            catch (error) {
+                header.setText(theme.fg("warning", `RLM sub-agent · ${name} · unavailable`));
+                transcript.setText(error instanceof Error ? error.message : String(error));
+                footer.setText(theme.fg("muted", "q/Esc close"));
+            }
+            this.invalidate();
+            tui.requestRender();
+        };
+        this.refresh();
+        this.timer = setInterval(this.refresh, 150);
+    }
+    handleMouse(event) {
+        if (this.closed || event.type !== "wheel" || !event.wheelDelta)
+            return;
+        this.scroll.scrollBy(event.wheelDelta);
+        this.tui.requestRender();
+        return { handled: true };
+    }
+    handleInput(data) {
+        if (this.closed)
+            return;
+        if (data === "q" || data === "Q" || matchesKey(data, Key.escape)) {
+            this.close();
+            return;
+        }
+        if (matchesKey(data, Key.pageUp)) {
+            this.scroll.scrollBy(-Math.max(1, this.scroll.viewportHeight - 1));
+        }
+        else if (matchesKey(data, Key.pageDown)) {
+            this.scroll.scrollBy(Math.max(1, this.scroll.viewportHeight - 1));
+        }
+        else if (matchesKey(data, Key.up)) {
+            this.scroll.scrollBy(-1);
+        }
+        else if (matchesKey(data, Key.down)) {
+            this.scroll.scrollBy(1);
+        }
+        else if (matchesKey(data, Key.home)) {
+            this.scroll.scrollToStart();
+        }
+        else if (matchesKey(data, Key.end)) {
+            this.scroll.scrollToEnd();
+        }
+        else {
+            return;
+        }
+        this.tui.requestRender();
+    }
+    // Keep direct component rendering usable as well as the host's layout-node
+    // overlay path; both paths keep the header and footer fixed.
+    render(width) {
+        const safeWidth = Math.max(1, width);
+        const contentWidth = this.scroll.getContentWidth(safeWidth);
+        const contentLines = this.transcript.render(contentWidth);
+        const viewportHeight = Math.max(1, Math.floor((this.tui.terminal.rows ?? 24) * 0.88) - 2);
+        this.scroll.updateLayout(contentLines.length, viewportHeight, () => this.tui.requestRender());
+        const visible = contentLines.slice(this.scroll.scrollTop, this.scroll.scrollTop + viewportHeight);
+        while (visible.length < viewportHeight)
+            visible.push("");
+        return [
+            ...this.header.render(safeWidth).slice(0, 1),
+            ...visible,
+            ...this.footer.render(safeWidth).slice(0, 1),
+        ];
+    }
+    invalidate() {
+        super.invalidate();
+    }
+    dispose() {
+        this.close();
+    }
+    close() {
+        if (this.closed)
+            return;
+        this.closed = true;
+        clearInterval(this.timer);
+        this.done(undefined);
+    }
+}
+export async function browseSubagent(ctx, runtime, requestedName) {
+    if (!ctx.hasUI || ctx.mode !== "tui" || !runtime)
+        return;
+    const agents = runtime.listSubagents();
+    if (!agents.length) {
+        ctx.ui.notify("No RLM sub-agents", "info");
+        return;
+    }
+    let name = requestedName?.trim();
+    if (!name) {
+        name = await ctx.ui.select("Inspect RLM sub-agent", agents.map((agent) => agent.name));
+    }
+    if (!name)
+        return;
+    const selected = agents.find((agent) => agent.name === name);
+    if (!selected) {
+        ctx.ui.notify(`No RLM sub-agent named ${name}`, "error");
+        return;
+    }
+    await ctx.ui.custom((tui, theme, _keybindings, done) => new SubagentBrowser(tui, theme, name, runtime, done), {
+        overlay: true,
+        overlayOptions: { width: "94%", maxHeight: "88%", anchor: "center" },
+    });
+}
+export function showSubagents(ctx, runtime, expanded) {
+    if (!ctx.hasUI)
+        return;
+    const view = subagentTreeView(runtime?.listActiveSubagents() ?? []);
+    if (!view.total) {
+        ctx.ui.setWidget(SUBAGENTS_WIDGET, undefined);
+        return;
+    }
+    const header = `${expanded ? "▾" : "▸"} Sub-agents · ${view.running} running · ${view.total} active`;
+    const lines = [ctx.ui.theme.fg("muted", `${header}  Ctrl+Alt+A`)];
+    if (expanded) {
+        for (const { prefix, subagent } of view.rows)
+            lines.push(...formatSubagent(ctx, prefix, subagent));
+        if (view.rows.length < view.total)
+            lines.push(ctx.ui.theme.fg("dim", `   … ${view.total - view.rows.length} more`));
+    }
+    ctx.ui.setWidget(SUBAGENTS_WIDGET, lines);
+}
+function formatSubagent(ctx, prefix, subagent) {
+    const state = subagent.status === "running" ? ctx.ui.theme.fg("success", "● running") : ctx.ui.theme.fg("muted", "idle");
+    const detail = [subagent.command, subagent.output && `↳ ${subagent.output}`].filter(Boolean).join(" · ");
+    const lines = [`${ctx.ui.theme.fg("dim", prefix)}${ctx.ui.theme.fg("text", subagent.name)} ${ctx.ui.theme.fg("dim", "·")} ${state}${subagent.activity ? ` ${ctx.ui.theme.fg("dim", `(${subagent.activity})`)}` : ""}`];
+    if (detail) {
+        const continuation = prefix.replace(/[├└]─ /, "   ");
+        lines.push(`${ctx.ui.theme.fg("dim", continuation)}${ctx.ui.theme.fg("muted", detail)}`);
+    }
+    return lines;
+}

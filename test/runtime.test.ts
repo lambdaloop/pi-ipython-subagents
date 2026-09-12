@@ -1,0 +1,478 @@
+import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
+import piRlmRuntime, { syncActiveTools } from "../dist/index.js";
+import { createKernelRuntime } from "../dist/kernel.js";
+import { createIpythonRenderers } from "../dist/render.js";
+import { buildPiRlmRuntimePrompt } from "../dist/prompt.js";
+import { SessionRuntime } from "../dist/session.js";
+import { browseSubagent } from "../dist/ui.js";
+import { filterChildExtensions, startSubagent, SUBAGENT_EXTENSION_NAME } from "../dist/subagent.js";
+
+function mockPi() {
+	const events = new Map();
+	const flags = new Map();
+	let active = ["read", "bash", "edit", "write"];
+	const tools = [];
+	const pi = {
+		registerFlag(name, options) {
+			flags.set(name, options.default);
+		},
+		getFlag(name) {
+			return flags.get(name);
+		},
+		registerCommand() {},
+		registerShortcut() {},
+		registerTool(tool) {
+			tools.push(tool.name);
+		},
+		getAllTools() {
+			return tools.map((name) => ({ name }));
+		},
+		getActiveTools() {
+			return [...active];
+		},
+		setActiveTools(names) {
+			active = [...names];
+		},
+		on(name, handler) {
+			events.set(name, handler);
+		},
+	};
+	return { pi, events, flags, tools, get active() { return active; } };
+}
+
+test("RLM is enabled by default and preserves native tools", async () => {
+	const mock = mockPi();
+	piRlmRuntime(mock.pi);
+	await mock.events.get("turn_start")();
+	assert.equal(mock.flags.get("rlm-runtime"), true);
+	assert.deepEqual(mock.active, ["read", "bash", "edit", "write", "ipython"]);
+	await mock.events.get("turn_start")();
+	assert.equal(mock.active.filter((name) => name === "ipython").length, 1);
+
+	mock.flags.set("no-rlm-runtime", true);
+	mock.active.splice(0, mock.active.length, "read", "bash");
+	await mock.events.get("turn_start")();
+	assert.deepEqual(mock.active, ["read", "bash"]);
+});
+
+test("sub-agent policy leaves only ipython and the prompt distinguishes session roles", () => {
+	const mock = mockPi();
+	syncActiveTools(mock.pi, true);
+	assert.deepEqual(mock.active, ["ipython"]);
+	mock.pi.setActiveTools(["ipython", "read", "bash"]);
+	syncActiveTools(mock.pi, true);
+	assert.deepEqual(mock.active, ["ipython"]);
+
+	const mainPrompt = buildPiRlmRuntimePrompt({ cwd: "/tmp", messagesPath: "none", depth: 0, maxDepth: 4 });
+	const subPrompt = buildPiRlmRuntimePrompt({
+		cwd: "/tmp",
+		messagesPath: "none",
+		depth: 1,
+		maxDepth: 4,
+		parentName: "main",
+	});
+	assert.match(mainPrompt, /other native Pi tools stay enabled/);
+	assert.match(subPrompt, /only direct tool/);
+	assert.doesNotMatch(subPrompt, /parent session keeps its full tool set/);
+});
+
+test("RLM appends its prompt and shuts down cleanly", async () => {
+	const mock = mockPi();
+	piRlmRuntime(mock.pi);
+	const ctx = {
+		cwd: "/tmp",
+		hasUI: false,
+		mode: "print",
+		sessionManager: {
+			getBranch: () => [],
+			getSessionId: () => "prompt-test",
+			getSessionFile: () => undefined,
+		},
+		ui: { setWidget() {}, notify() {} },
+	};
+	const result = await mock.events.get("before_agent_start")(
+		{ systemPrompt: "BASE_SENTINEL", systemPromptOptions: { cwd: "/tmp" } },
+		ctx,
+	);
+	assert.equal((result.systemPrompt.match(/BASE_SENTINEL/g) ?? []).length, 1);
+	assert.match(result.systemPrompt, /Kernel environments: the first line of a cell may be `%%kernel`/);
+	assert.match(result.systemPrompt, /`ipython` is your primary tool/);
+	await mock.events.get("session_shutdown")({}, ctx);
+});
+
+test("subagent browser scrolls, preserves position, supports wheel, and cleans up", async () => {
+	let component;
+	let closed = false;
+	let lines = Array.from({ length: 220 }, (_, index) => `line ${index}`);
+	const runtime = {
+		listSubagents: () => [{ name: "demo", status: "running" }],
+		subagentTranscript: () => lines.join("\n"),
+	};
+	let terminalRows = 30;
+	const tui = { terminal: { get rows() { return terminalRows; } }, requestRender() {} };
+	const ctx = {
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			select: async () => undefined,
+			notify() {},
+			custom: async (factory) => {
+				component = factory(tui, { fg: (_color, text) => text }, {}, () => {
+					closed = true;
+				});
+			},
+		},
+	};
+
+	try {
+		await browseSubagent(ctx, runtime, "demo");
+		let frame = renderLayoutFrame(component, 80, 20, () => {});
+		assert.match(frame.lines.join("\n"), /line 219/);
+		assert.match(component.render(80).join("\n"), /line 219/);
+
+		component.handleInput("\x1b[5~");
+		frame = renderLayoutFrame(component, 80, 20, () => {});
+		assert.ok(frame.primaryScrollView.scrollTop > 0);
+		assert.doesNotMatch(frame.lines.join("\n"), /line 219/);
+		const pinned = frame.primaryScrollView.scrollTop;
+		lines.push(...Array.from({ length: 40 }, (_, index) => `new ${index}`));
+		component.refresh();
+		component.render(40);
+		assert.equal(component.scroll.scrollTop, pinned);
+		assert.equal(component.scroll.isFollowingEnd, false);
+		frame = renderLayoutFrame(component, 40, 20, () => {});
+		assert.equal(frame.primaryScrollView.scrollTop, pinned);
+		assert.equal(component.scroll.scrollTop, pinned);
+
+		terminalRows = 400;
+		component.refresh();
+		component.render(40);
+		assert.equal(component.scroll.scrollTop, 0);
+		assert.equal(component.scroll.isFollowingEnd, false);
+		terminalRows = 30;
+		component.refresh();
+		component.render(40);
+		assert.equal(component.scroll.scrollTop, 0);
+		assert.equal(component.scroll.isFollowingEnd, false);
+
+		const beforeWheel = component.scroll.scrollTop;
+		component.handleMouse({ type: "wheel", wheelDelta: 1 });
+		frame = renderLayoutFrame(component, 80, 20, () => {});
+		const afterWheel = frame.primaryScrollView.scrollTop;
+		assert.ok(afterWheel > beforeWheel);
+		component.handleInput("\x1b[4~");
+		frame = renderLayoutFrame(component, 80, 20, () => {});
+		assert.ok(frame.primaryScrollView.scrollTop > afterWheel);
+		assert.match(frame.lines.join("\n"), /new 39/);
+
+		lines = ["short transcript"];
+		component.refresh();
+		assert.equal(component.render(80).length > 0, true);
+		assert.equal(component.scroll.scrollTop, 0);
+		lines = Array.from({ length: 220 }, (_, index) => `resized ${index}`);
+		component.refresh();
+		assert.match(component.render(40).join("\n"), /resized 219/);
+		assert.ok(component.scroll.scrollTop > 0);
+	} finally {
+		component?.dispose();
+	}
+	assert.equal(closed, true);
+});
+
+test("startSubagent restricts startup and later turns to ipython", async () => {
+	const workspace = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-child-"));
+	const agentDir = getAgentDir();
+	const cwd = process.cwd();
+	const model = { provider: "openai-codex", id: "gpt-5.6-luna" };
+	try {
+		const child = await startSubagent({
+			cwd,
+			agentDir,
+			subagentDir: workspace,
+			name: "tool-policy-child",
+			task: "test tool policy",
+			depth: 1,
+			maxDepth: 4,
+			model,
+			parent: { name: "main", id: "main-id" },
+			runtime: {},
+			makeExtension: (subagent) => ({
+				name: SUBAGENT_EXTENSION_NAME,
+				hidden: true,
+				factory: (pi) => {
+					pi.registerTool({
+						name: "ipython",
+						label: "ipython",
+						description: "test double",
+						parameters: {},
+						execute: async () => ({ content: [] }),
+					});
+					pi.on("turn_start", () => syncActiveTools(pi, subagent !== undefined));
+				},
+			}),
+		});
+		try {
+			assert.deepEqual(child.session.agent.state.tools.map((tool) => tool.name), ["ipython"]);
+			child.session.agent.state.tools.push({ name: "read" });
+			await child.session.extensionRunner.emit({ type: "turn_start" });
+			assert.deepEqual(child.session.agent.state.tools.map((tool) => tool.name), ["ipython"]);
+		} finally {
+			await child.close();
+		}
+	} finally {
+		rmSync(workspace, { recursive: true, force: true });
+	}
+});
+
+function clearKernelSelectionOverrides() {
+	const previousPython = process.env.PI_RLM_RUNTIME_PYTHON;
+	const previousPixi = process.env.PIXI_ENVIRONMENT_NAME;
+	delete process.env.PI_RLM_RUNTIME_PYTHON;
+	delete process.env.PIXI_ENVIRONMENT_NAME;
+	return () => {
+		if (previousPython === undefined) delete process.env.PI_RLM_RUNTIME_PYTHON;
+		else process.env.PI_RLM_RUNTIME_PYTHON = previousPython;
+		if (previousPixi === undefined) delete process.env.PIXI_ENVIRONMENT_NAME;
+		else process.env.PIXI_ENVIRONMENT_NAME = previousPixi;
+	};
+}
+
+function makeFakePixiProject(pixiExit = 0) {
+	const project = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-pixi-"));
+	const python = join(project, ".pixi", "envs", "default", "bin", "python");
+	const bin = join(project, "bin");
+	mkdirSync(join(project, ".pixi", "envs", "default", "bin"), { recursive: true });
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(project, "pyproject.toml"), "[tool.pixi.workspace]\nname = 'demo'\n");
+	writeFileSync(python, "#!/bin/sh\nexit 0\n");
+	writeFileSync(join(bin, "pixi"), `#!/bin/sh\nexit ${pixiExit}\n`);
+	chmodSync(python, 0o755);
+	chmodSync(join(bin, "pixi"), 0o755);
+	return { project, python, bin };
+}
+
+test("a healthy materialized pixi environment is the default kernel", () => {
+	const { project, python, bin } = makeFakePixiProject();
+	const restoreOverrides = clearKernelSelectionOverrides();
+	const previousPath = process.env.PATH;
+	process.env.PATH = `${bin}:${previousPath ?? ""}`;
+	try {
+		const runtime = createKernelRuntime({ cwd: project, runtimeDir: join(project, "python") });
+		assert.deepEqual(runtime.names(), ["uv", "pixi"]);
+		assert.equal(runtime.active, "pixi");
+		assert.equal(runtime.startupNote, undefined);
+		const pixi = runtime.find("pixi");
+		assert.equal(pixi.python, python);
+		assert.equal(pixi.command, "pixi");
+		assert.deepEqual(pixi.commandArgs.slice(0, 4), ["run", "--manifest-path", project, "--environment"]);
+		assert.match(runtime.describe(pixi).join("\n"), /pixi.*active/);
+		runtime.apply(runtime.find("uv"));
+		assert.equal(runtime.active, "uv");
+	} finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+		restoreOverrides();
+		rmSync(project, { recursive: true, force: true });
+	}
+});
+
+test("kernel startup falls back to uv when pixi is absent or broken", () => {
+	const restoreOverrides = clearKernelSelectionOverrides();
+	const absent = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-no-pixi-"));
+	try {
+		const runtime = createKernelRuntime({ cwd: absent, runtimeDir: join(absent, "python") });
+		assert.equal(runtime.active, "uv");
+		assert.match(runtime.startupNote, /No materialized Pixi environment/);
+		assert.match(runtime.describe(runtime.find("uv")).join("\n"), /startup:/);
+	} finally {
+		rmSync(absent, { recursive: true, force: true });
+	}
+
+	const { project, bin } = makeFakePixiProject(23);
+	const previousPath = process.env.PATH;
+	process.env.PATH = `${bin}:${previousPath ?? ""}`;
+	try {
+		const runtime = createKernelRuntime({ cwd: project, runtimeDir: join(project, "python") });
+		assert.equal(runtime.active, "uv");
+		assert.match(runtime.startupNote, /Pixi was unavailable/);
+	} finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+		rmSync(project, { recursive: true, force: true });
+		restoreOverrides();
+	}
+});
+
+test("an explicit interpreter overrides the automatic pixi default", () => {
+	const { project, python, bin } = makeFakePixiProject();
+	const previousPath = process.env.PATH;
+	const previousPython = process.env.PI_RLM_RUNTIME_PYTHON;
+	process.env.PATH = `${bin}:${previousPath ?? ""}`;
+	process.env.PI_RLM_RUNTIME_PYTHON = python;
+	try {
+		const runtime = createKernelRuntime({ cwd: project, runtimeDir: join(project, "python") });
+		assert.equal(runtime.active, "python");
+		assert.equal(runtime.activeSpec.python, python);
+	} finally {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+		if (previousPython === undefined) delete process.env.PI_RLM_RUNTIME_PYTHON;
+		else process.env.PI_RLM_RUNTIME_PYTHON = previousPython;
+		rmSync(project, { recursive: true, force: true });
+	}
+});
+
+function stubKernels() {
+	const environments = [
+		{ name: "uv", label: "isolated uv environment", detail: "uv run", kind: "uv", command: "uv", commandArgs: [], cwd: "/tmp" },
+		{ name: "second", label: "second uv environment", detail: "uv run again", kind: "uv", command: "uv", commandArgs: [], cwd: "/tmp" },
+	];
+	const kernels = {
+		environments,
+		cwd: "/tmp",
+		command: "false",
+		commandArgs: [],
+		kernelEnv: process.env,
+		active: "uv",
+		activeSpec: environments[0],
+		names: () => environments.map((environment) => environment.name),
+		find: (name) => environments.find((environment) => environment.name === name),
+		describe: (spec) => [`${spec.name} — ${spec.label}${spec.name === kernels.active ? " (active)" : ""}`],
+		apply(spec) {
+			this.active = spec.name;
+			this.activeSpec = spec;
+		},
+	};
+	return kernels;
+}
+
+function runtimeWith(kernels) {
+	const ctx = {
+		cwd: "/tmp",
+		sessionManager: { getBranch: () => [], getSessionId: () => "directive-test", getSessionFile: () => undefined },
+	};
+	return new SessionRuntime({
+		pi: {},
+		ctx,
+		depth: 0,
+		maxDepth: 1,
+		agentDir: "/tmp",
+		runtimeDir: "/tmp",
+		runtime: kernels,
+		subagentsChanged() {},
+		makeExtension: () => ({}),
+	});
+}
+
+test("the %%kernel directive lists environments, switches, and rejects unknown names", async () => {
+	const runtime = runtimeWith(stubKernels());
+	try {
+		const listed = await runtime.execute("%%kernel", undefined, undefined);
+		assert.equal(listed.status, "ok");
+		assert.match(listed.stdout, /uv — isolated uv environment \(active\)/);
+		assert.match(listed.stdout, /second — second uv environment/);
+
+		const switched = await runtime.execute("%%kernel second", undefined, undefined);
+		assert.equal(switched.status, "ok");
+		assert.match(switched.stdout, /environment 'second'/);
+		assert.equal(runtime.kernels.active, "second");
+
+		const unknown = await runtime.execute("%%kernel missing", undefined, undefined);
+		assert.equal(unknown.status, "error");
+		assert.match(unknown.error.evalue, /Unknown kernel environment 'missing'/);
+		assert.equal(runtime.kernels.active, "second");
+
+		const needsPath = await runtime.execute("%%kernel python relative/path", undefined, undefined);
+		assert.equal(needsPath.status, "error");
+		assert.match(needsPath.error.evalue, /must be absolute/);
+
+		// A cell without the directive is not handled on the host: it reaches the
+		// kernel, which the stub deliberately cannot start.
+		await assert.rejects(runtime.execute("x = 1", undefined, undefined));
+	}
+	finally {
+		await runtime.dispose();
+	}
+});
+
+test("the %%kernel directive only applies on the first line", async () => {
+	const runtime = runtimeWith(stubKernels());
+	try {
+		await assert.rejects(runtime.execute("print('hi')\n%%kernel second", undefined, undefined));
+		assert.equal(runtime.kernels.active, "uv");
+	}
+	finally {
+		await runtime.dispose();
+	}
+});
+
+test("the ipython row renders like a shell command with elapsed and total time", () => {
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+	const renderers = createIpythonRenderers();
+	const state: Record<string, any> = {};
+	const context = {
+		args: { code: "import time\ntime.sleep(1)" },
+		toolCallId: "call-1",
+		state,
+		invalidate: () => {},
+		isError: false,
+		showImages: true,
+		executionStarted: true,
+		argsComplete: true,
+		isPartial: true,
+		expanded: false,
+		cwd: "/tmp",
+	} as any;
+	const call = renderers.renderCall(context.args, theme as any, context);
+	assert.deepEqual(
+		call.render(80).map((line) => line.trimEnd()),
+		["$ import time", "  time.sleep(1)"],
+	);
+	assert.equal(typeof state.startedAt, "number");
+
+	const partial = renderers.renderResult(
+		{ content: [{ type: "text", text: "ignored wrapper" }], details: { output: "tick" } } as any,
+		{ expanded: false, isPartial: true } as any,
+		theme as any,
+		context,
+	);
+	const partialLines = partial.render(80).join("\n");
+	assert.match(partialLines, /^\ntick/);
+	assert.match(partialLines, /Elapsed \d+\.\ds/);
+	assert.doesNotMatch(partialLines, /ignored wrapper/);
+	assert.ok(state.interval, "a running cell ticks so the elapsed time updates");
+
+	const final = renderers.renderResult(
+		{ content: [{ type: "text", text: "ignored wrapper" }], details: { output: "done\n" } } as any,
+		{ expanded: false, isPartial: false } as any,
+		theme as any,
+		context,
+	);
+	const finalLines = final.render(80).join("\n");
+	assert.match(finalLines, /^\ndone/);
+	assert.match(finalLines, /Took \d+\.\ds/);
+	assert.equal(state.interval, undefined);
+});
+
+test("child extension filter removes only the discovered root RLM extension", () => {
+	const root = new URL("../dist/index.js", import.meta.url).pathname;
+	const result = filterChildExtensions({
+		extensions: [
+			{ resolvedPath: root },
+			{ resolvedPath: "/tmp/unrelated-extension.js" },
+			{ resolvedPath: "<inline:1>" },
+		],
+		errors: [],
+		runtime: {},
+	});
+	assert.deepEqual(result.extensions.map((extension) => extension.resolvedPath), [
+		"/tmp/unrelated-extension.js",
+		"<inline:1>",
+	]);
+});
