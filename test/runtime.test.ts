@@ -4,14 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
+import { BackgroundTasks } from "../dist/background.js";
 import piRlmRuntime, { syncActiveTools } from "../dist/index.js";
 import { createKernelRuntime } from "../dist/kernel.js";
-import { createIpythonRenderers } from "../dist/render.js";
 import { buildPiRlmRuntimePrompt } from "../dist/prompt.js";
+import { createIpythonRenderers } from "../dist/render.js";
 import { SessionRuntime } from "../dist/session.js";
-import { browseSubagent } from "../dist/ui.js";
 import { filterChildExtensions, startSubagent, SUBAGENT_EXTENSION_NAME } from "../dist/subagent.js";
+import { browseSubagent, showSubagents } from "../dist/ui.js";
+import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
 
 function mockPi() {
 	const events = new Map();
@@ -104,6 +105,31 @@ test("RLM appends its prompt and shuts down cleanly", async () => {
 	assert.match(result.systemPrompt, /Kernel environments: the first line of a cell may be `%%kernel`/);
 	assert.match(result.systemPrompt, /`ipython` is your primary tool/);
 	await mock.events.get("session_shutdown")({}, ctx);
+});
+
+test("background tasks are marked distinctly in the sub-agent tree", () => {
+	let widget;
+	const ctx = {
+		hasUI: true,
+		ui: {
+			theme: { fg: (_color, text) => text },
+			setWidget: (_id, value) => { widget = value; },
+		},
+	};
+	showSubagents(ctx, {
+		listActiveSubagents: () => [{
+			name: "tests",
+			status: "idle",
+			taskStatus: "completed",
+			kind: "task",
+			command: "$ printf done",
+			output: "done",
+			activity: "completed",
+			subagents: [],
+		}],
+	}, true);
+	assert.match(widget.join("\n"), /tests.*◆ completed/);
+	assert.match(widget.join("\n"), /\$ printf done/);
 });
 
 test("subagent browser scrolls, preserves position, supports wheel, and cleans up", async () => {
@@ -227,6 +253,123 @@ test("startSubagent restricts startup and later turns to ipython", async () => {
 		}
 	} finally {
 		rmSync(workspace, { recursive: true, force: true });
+	}
+});
+
+function makeBackgroundTasks() {
+	const root = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-bg-"));
+	const notifications = [];
+	const tasks = new BackgroundTasks({
+		cwd: root,
+		logDir: join(root, "tasks"),
+		notify: (message, task) => notifications.push({ message, task }),
+	});
+	return { root, tasks, notifications };
+}
+
+test("background tasks return handles, capture logs, and notify on completion", async () => {
+	const { root, tasks, notifications } = makeBackgroundTasks();
+	try {
+		const started = tasks.start({ command: "printf 'hello\\nworld\\n'", name: "hello" });
+		assert.equal(started.status, "running");
+		const finished = await tasks.wait(started.id);
+		assert.equal(finished.status, "completed");
+		assert.equal(finished.exit_code, 0);
+		assert.match(tasks.logs(started.id).text, /hello\nworld/);
+		assert.equal(notifications.length, 1);
+		assert.match(notifications[0].message, /Background task finished: hello/);
+		assert.equal(notifications[0].task.id, started.id);
+	} finally {
+		await tasks.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("background tasks report failures, bound logs, and reject duplicate names", async () => {
+	const { root, tasks, notifications } = makeBackgroundTasks();
+	try {
+		const failed = tasks.start({ command: "printf 1234567890; exit 3", name: "failure", notify: false });
+		const result = await tasks.wait(failed.id);
+		assert.equal(result.status, "failed");
+		assert.equal(result.exit_code, 3);
+		assert.equal(notifications.length, 0);
+		assert.equal(tasks.logs(failed.id, { maxBytes: 4, tail: false }).text, "1234");
+		assert.throws(() => tasks.start({ command: "true", name: "failure" }), /already exists/);
+	} finally {
+		await tasks.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("background tasks can be killed, disposed, and waited with abort", async () => {
+	const { root, tasks } = makeBackgroundTasks();
+	try {
+		const killed = tasks.start({ command: "sleep 30", name: "killed" });
+		assert.equal((await tasks.kill(killed.id)).status, "killed");
+
+		const timedOut = tasks.start({ command: "sleep 30", name: "timed out", timeoutSeconds: 1 });
+		assert.equal((await tasks.wait(timedOut.id)).status, "failed");
+		assert.match(tasks.get(timedOut.id).error, /timed out/);
+
+		const aborted = tasks.start({ command: "sleep 30", name: "aborted" });
+		const controller = new AbortController();
+		const waiting = tasks.wait(aborted.id, controller.signal);
+		controller.abort();
+		await assert.rejects(waiting, { name: "AbortError" });
+		await tasks.dispose();
+		assert.equal(tasks.get(aborted.id).status, "killed");
+	} finally {
+		await tasks.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("SessionRuntime delivers background completion like a sub-agent message", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-session-bg-"));
+	const messages = [];
+	const ctx = {
+		cwd: root,
+		hasUI: false,
+		mode: "print",
+		isIdle: () => true,
+		isProjectTrusted: () => true,
+		model: undefined,
+		thinkingLevel: "off",
+		sessionManager: {
+			getBranch: () => [],
+			getSessionId: () => "session-bg-test",
+			getSessionFile: () => undefined,
+			getSessionDir: () => root,
+			getSessionName: () => "main",
+		},
+	};
+	const runtime = new SessionRuntime({
+		pi: {
+			sendMessage: (message, options) => messages.push({ message, options }),
+			appendEntry() {},
+		},
+		ctx,
+		depth: 0,
+		maxDepth: 4,
+		agentDir: root,
+		runtimeDir: join(root, "runtime"),
+	});
+	try {
+		const started = await runtime.request({ type: "bg.run", command: "printf done", name: "session task" }, new AbortController().signal);
+		assert.equal(started.status, "running");
+		assert.equal(runtime.listActiveSubagents().find((item) => item.kind === "task").name, "session task");
+		const finished = await runtime.request({ type: "bg.wait", task: started.id }, new AbortController().signal);
+		assert.equal(finished.status, "completed");
+		assert.equal(runtime.listActiveSubagents().find((item) => item.kind === "task"), undefined);
+		assert.equal(runtime.listInspectable().find((item) => item.kind === "task").name, "session task");
+		assert.equal(messages.length, 1);
+		assert.equal(messages[0].message.customType, "pi-rlm-runtime.message");
+		assert.equal(messages[0].options.triggerTurn, true);
+		assert.match(messages[0].message.content, /Background task finished/);
+		assert.match(runtime.subagentTranscript("session task"), /done/);
+	} finally {
+		await runtime.dispose();
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 

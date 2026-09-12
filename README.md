@@ -67,6 +67,29 @@ await rlm.delete_subagent(reviewer)
 
 `agent_message.send()` accepts `parent`, `sibling`, or `subagent` as `receiver_role`. Messages to more distant agents are relayed through the tree.
 
+## Background tasks
+
+IPython exposes `bg` as a callable for long-running shell work. It is implemented by this runtime
+rather than by `pi-background-tasks`, and behaves like a one-shot sub-agent: it returns immediately,
+shows up in the sub-agent tree/browser, writes a session-owned log, and sends a completion message.
+Tasks are not persisted across Pi restarts.
+
+```python
+task = await bg("pixi run pytest", name="test suite", timeout_seconds=1800)
+
+# Deliberate inspection or cleanup:
+current = await task.refresh()
+logs = await task.logs(max_bytes=20_000)
+await task.kill()
+
+# Only wait in-cell when the result is needed immediately:
+finished = await task.wait()
+```
+
+The task runs with the session's shell environment and working directory. Use `pixi run ...` when
+project dependencies are needed. `bg(...)` is available to the main agent and to ipython-only
+sub-agents; completion notifications wake the owning session.
+
 ## Python environment
 
 At startup, the runtime automatically prefers a materialized Pixi environment for the project when

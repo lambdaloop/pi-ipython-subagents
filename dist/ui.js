@@ -1,4 +1,5 @@
 import { Key, matchesKey, ScrollView, Text, VStack } from "@earendil-works/pi-tui";
+
 const SUBAGENTS_WIDGET = "pi-rlm-runtime-subagents";
 const MAX_VISIBLE_SUBAGENTS = 12;
 class PreservingScrollView extends ScrollView {
@@ -62,9 +63,11 @@ class SubagentBrowser extends VStack {
                 return;
             try {
                 const body = runtime.subagentTranscript(name);
-                const status = runtime.listSubagents().find((agent) => agent.name === name)?.status ?? "unknown";
+                const inspectable = (runtime.listInspectable?.() ?? runtime.listSubagents()).find((agent) => agent.name === name);
+                const status = inspectable?.status ?? "unknown";
+                const kind = inspectable?.kind === "task" ? "background task" : "RLM sub-agent";
                 const atBottom = scroll.isFollowingEnd;
-                header.setText(theme.fg("accent", `RLM sub-agent · ${name} · ${status}`));
+                header.setText(theme.fg("accent", `${kind} · ${name} · ${status}`));
                 transcript.setText(body);
                 footer.setText(theme.fg("muted", `↑/↓ scroll · PgUp/PgDn page · Home/End jump · q/Esc close${atBottom ? " · following latest" : " · paused"}`));
             }
@@ -150,20 +153,21 @@ class SubagentBrowser extends VStack {
 export async function browseSubagent(ctx, runtime, requestedName) {
     if (!ctx.hasUI || ctx.mode !== "tui" || !runtime)
         return;
-    const agents = runtime.listSubagents();
+    const agents = runtime.listInspectable?.() ?? runtime.listSubagents();
     if (!agents.length) {
-        ctx.ui.notify("No RLM sub-agents", "info");
+        ctx.ui.notify("No RLM sub-agents or background tasks", "info");
         return;
     }
     let name = requestedName?.trim();
     if (!name) {
-        name = await ctx.ui.select("Inspect RLM sub-agent", agents.map((agent) => agent.name));
+        name = await ctx.ui.select("Inspect agent or task", agents.map((agent) => `${agent.kind === "task" ? "◆ " : ""}${agent.name}`));
+        name = name?.replace(/^◆\s+/, "");
     }
     if (!name)
         return;
     const selected = agents.find((agent) => agent.name === name);
     if (!selected) {
-        ctx.ui.notify(`No RLM sub-agent named ${name}`, "error");
+        ctx.ui.notify(`No RLM sub-agent or background task named ${name}`, "error");
         return;
     }
     await ctx.ui.custom((tui, theme, _keybindings, done) => new SubagentBrowser(tui, theme, name, runtime, done), {
@@ -190,7 +194,10 @@ export function showSubagents(ctx, runtime, expanded) {
     ctx.ui.setWidget(SUBAGENTS_WIDGET, lines);
 }
 function formatSubagent(ctx, prefix, subagent) {
-    const state = subagent.status === "running" ? ctx.ui.theme.fg("success", "● running") : ctx.ui.theme.fg("muted", "idle");
+    const isTask = subagent.kind === "task";
+    const state = isTask
+        ? ctx.ui.theme.fg(subagent.taskStatus === "failed" ? "error" : subagent.taskStatus === "completed" ? "success" : "muted", `◆ ${subagent.taskStatus ?? subagent.status}`)
+        : subagent.status === "running" ? ctx.ui.theme.fg("success", "● running") : ctx.ui.theme.fg("muted", "idle");
     const detail = [subagent.command, subagent.output && `↳ ${subagent.output}`].filter(Boolean).join(" · ");
     const lines = [`${ctx.ui.theme.fg("dim", prefix)}${ctx.ui.theme.fg("text", subagent.name)} ${ctx.ui.theme.fg("dim", "·")} ${state}${subagent.activity ? ` ${ctx.ui.theme.fg("dim", `(${subagent.activity})`)}` : ""}`];
     if (detail) {

@@ -49,6 +49,45 @@ class AgentList:
     entries: tuple[RelatedAgent, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class BackgroundLogs:
+    text: str
+    path: str
+    bytes_read: int
+    truncated: bool
+    tail: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundTask:
+    id: str
+    name: str
+    command: str
+    cwd: str
+    status: str
+    pid: int | None
+    exit_code: int | None
+    started_at: int
+    ended_at: int | None
+    duration_ms: int
+    log_path: str
+    last_line: str | None
+    signal: str | None
+    error: str | None
+
+    async def refresh(self) -> "BackgroundTask":
+        return await bg.status(self)
+
+    async def logs(self, max_bytes: int = 20_000, tail: bool = True) -> BackgroundLogs:
+        return await bg.logs(self, max_bytes=max_bytes, tail=tail)
+
+    async def kill(self) -> "BackgroundTask":
+        return await bg.kill(self)
+
+    async def wait(self, timeout_seconds: int | None = None) -> "BackgroundTask":
+        return await bg.wait(self, timeout_seconds=timeout_seconds)
+
+
 def _install_control_handlers() -> None:
     kernel = get_ipython().kernel
     kernel.control_handlers.setdefault("comm_msg", kernel.comm_manager.comm_msg)
@@ -126,6 +165,117 @@ def _model(result: Any) -> RLMModel:
         name=_text(result.get("name"), "name"),
         selector=_text(result.get("selector"), "selector"),
     )
+
+
+def _background_task(result: Any) -> BackgroundTask:
+    if not isinstance(result, dict):
+        raise TypeError("background task must be an object")
+    def optional_int(name: str) -> int | None:
+        value = result.get(name)
+        if value is None:
+            return None
+        if not isinstance(value, int):
+            raise TypeError(f"{name} must be an int or None")
+        return value
+    return BackgroundTask(
+        id=_text(result.get("id"), "id"),
+        name=_text(result.get("name"), "name"),
+        command=_text(result.get("command"), "command"),
+        cwd=_text(result.get("cwd"), "cwd"),
+        status=_text(result.get("status"), "status"),
+        pid=optional_int("pid"),
+        exit_code=optional_int("exit_code"),
+        started_at=result.get("started_at") if isinstance(result.get("started_at"), int) else 0,
+        ended_at=optional_int("ended_at"),
+        duration_ms=result.get("duration_ms") if isinstance(result.get("duration_ms"), int) else 0,
+        log_path=_text(result.get("log_path"), "log_path"),
+        last_line=result.get("last_line") if isinstance(result.get("last_line"), str) else None,
+        signal=result.get("signal") if isinstance(result.get("signal"), str) else None,
+        error=result.get("error") if isinstance(result.get("error"), str) else None,
+    )
+
+
+def _background_logs(result: Any) -> BackgroundLogs:
+    if not isinstance(result, dict):
+        raise TypeError("background logs must be an object")
+    text = result.get("text")
+    path = result.get("path")
+    bytes_read = result.get("bytesRead")
+    truncated = result.get("truncated")
+    tail = result.get("tail")
+    if not isinstance(text, str) or not isinstance(path, str) or not isinstance(bytes_read, int):
+        raise TypeError("background logs have invalid text, path, or bytesRead")
+    if not isinstance(truncated, bool) or not isinstance(tail, bool):
+        raise TypeError("background logs have invalid truncation metadata")
+    return BackgroundLogs(text, path, bytes_read, truncated, tail)
+
+
+def _task_target(task: str | BackgroundTask) -> str:
+    return task.id if isinstance(task, BackgroundTask) else _text(task, "task")
+
+
+class Background:
+    async def __call__(
+        self,
+        command: str,
+        *,
+        name: str | None = None,
+        cwd: str | None = None,
+        timeout_seconds: int | None = None,
+        notify: bool = True,
+    ) -> BackgroundTask:
+        return _background_task(
+            await _request(
+                "bg.run",
+                command=_text(command, "command"),
+                name=_text(name, "name") if name is not None else None,
+                cwd=_text(cwd, "cwd") if cwd is not None else None,
+                timeout_seconds=timeout_seconds,
+                notify=notify,
+            )
+        )
+
+    async def list(self) -> list[BackgroundTask]:
+        return [_background_task(task) for task in await _request("bg.list")]
+
+    async def status(self, task: str | BackgroundTask | None = None) -> BackgroundTask | list[BackgroundTask]:
+        result = await _request("bg.status", task=_task_target(task) if task is not None else None)
+        if task is None:
+            return [_background_task(item) for item in result]
+        return _background_task(result)
+
+    async def logs(
+        self,
+        task: str | BackgroundTask,
+        *,
+        max_bytes: int = 20_000,
+        tail: bool = True,
+    ) -> BackgroundLogs:
+        return _background_logs(
+            await _request(
+                "bg.logs",
+                task=_task_target(task),
+                max_bytes=max_bytes,
+                tail=tail,
+            )
+        )
+
+    async def kill(self, task: str | BackgroundTask) -> BackgroundTask:
+        return _background_task(await _request("bg.kill", task=_task_target(task)))
+
+    async def wait(
+        self,
+        task: str | BackgroundTask,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> BackgroundTask:
+        return _background_task(
+            await _request(
+                "bg.wait",
+                task=_task_target(task),
+                timeout_seconds=timeout_seconds,
+            )
+        )
 
 
 def _agent_list(result: Any) -> AgentList:
@@ -229,5 +379,17 @@ class AgentMessage:
 _install_control_handlers()
 rlm = RLM()
 agent_message = AgentMessage()
+bg = Background()
 
-__all__ = ["Agent", "AgentList", "RelatedAgent", "RLMModel", "Subagent", "agent_message", "rlm"]
+__all__ = [
+    "Agent",
+    "AgentList",
+    "BackgroundLogs",
+    "BackgroundTask",
+    "RelatedAgent",
+    "RLMModel",
+    "Subagent",
+    "agent_message",
+    "bg",
+    "rlm",
+]

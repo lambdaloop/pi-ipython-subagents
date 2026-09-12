@@ -91,7 +91,7 @@ function bindExtension(pi, subagent, registerStop) {
     if (!subagent) {
         const toggleSubagents = (ctx) => {
             if (!runtime?.listActiveSubagents().length) {
-                ctx.ui.notify("No active sub-agents", "info");
+                ctx.ui.notify("No active sub-agents or background tasks", "info");
                 return;
             }
             subagentsExpanded = !subagentsExpanded;
@@ -102,11 +102,11 @@ function bindExtension(pi, subagent, registerStop) {
             handler: async (_args, ctx) => toggleSubagents(ctx),
         });
         pi.registerCommand("subagent", {
-            description: "Browse a live RLM sub-agent transcript",
+            description: "Browse a live RLM sub-agent or background task transcript",
             handler: async (args, ctx) => browseSubagent(ctx, runtimeFor(ctx), args),
         });
         pi.registerShortcut("ctrl+alt+s", {
-            description: "Browse a live RLM sub-agent transcript",
+            description: "Browse a live RLM sub-agent or background task transcript",
             handler: async (ctx) => browseSubagent(ctx, runtimeFor(ctx)),
         });
         pi.registerShortcut("ctrl+alt+a", {
@@ -123,8 +123,8 @@ function bindExtension(pi, subagent, registerStop) {
         pi.registerTool({
             name: IPYTHON_TOOL,
             label: "ipython",
-            description: "Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls. Start a cell with `%%kernel` to list or switch the kernel's Python environment (for example `%%kernel pixi` for the project's local pixi environment). Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
-            promptSnippet: "ipython - persistent agent notebook for Python scratchpad code and %%bash orchestration",
+            description: "Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls. Start a cell with `%%kernel` to list or switch the kernel's Python environment (for example `%%kernel pixi` for the project's local pixi environment). The preloaded `bg(...)` wrapper starts our own tracked long-running shell tasks from Python. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
+            promptSnippet: "ipython - persistent agent notebook for Python, %%bash, and tracked bg(...) tasks",
             parameters: ipythonParameters,
             executionMode: "sequential",
             ...createIpythonRenderers(),

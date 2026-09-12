@@ -26,7 +26,7 @@ const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 const TRUNCATED = "\n… output truncated …";
 const TRUNCATED_BYTES = Buffer.byteLength(TRUNCATED);
 const BOOTSTRAP = `%colors NoColor
-from pi_rlm_runtime import agent_message, rlm`;
+from pi_rlm_runtime import agent_message, bg, rlm`;
 export function retainExecutionOwner(owners, requestMsgId) {
     for (const [id, owner] of owners) {
         if (id === requestMsgId)

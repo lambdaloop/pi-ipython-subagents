@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { createKernelRuntime, SessionKernel, verifyKernelEnvironment, } from "./kernel.js";
+import { BackgroundTasks } from "./background.js";
 import { loadSubagents, SUBAGENT_ENTRY, subagentCreated, subagentDeleted } from "./state.js";
 import { startSubagent, } from "./subagent.js";
 const AGENT_MESSAGE_TYPE = "pi-rlm-runtime.message";
@@ -15,6 +16,7 @@ export class SessionRuntime {
     kernels;
     kernel;
     subagents = new Map();
+    tasks;
     starting = new Set();
     reservedNames = new Set();
     tempDir;
@@ -23,6 +25,16 @@ export class SessionRuntime {
         this.options = options;
         this.ctx = options.ctx;
         this.kernels = options.runtime ?? createKernelRuntime({ cwd: options.ctx.cwd, runtimeDir: options.runtimeDir });
+        this.tasks = new BackgroundTasks({
+            cwd: options.ctx.cwd,
+            logDir: join(this.subagentDir(), "tasks"),
+            nameAvailable: (name) => !this.findSubagent(name),
+            onChange: () => this.notifySubagents(),
+            notify: (message, task) => {
+                if (!this.closed)
+                    this.here(message, { id: task.id, name: task.name, depth: this.depth + 1 });
+            },
+        });
         for (const [id, saved] of loadSubagents(options.ctx.sessionManager.getBranch(), this.sessionId)) {
             this.subagents.set(id, { ...saved });
         }
@@ -42,7 +54,22 @@ export class SessionRuntime {
     listSubagents() {
         return sortedSubagents(this.subagents.values()).map(subagentInfo);
     }
+    listInspectable() {
+        return [
+            ...this.listSubagents(),
+            ...this.tasks.list().map((task) => ({
+                id: task.id,
+                name: task.name,
+                model: "background",
+                status: task.status,
+                kind: "task",
+            })),
+        ].sort((left, right) => left.name.localeCompare(right.name));
+    }
     subagentTranscript(target) {
+        const task = this.tasks.find(target);
+        if (task)
+            return this.tasks.transcript(task.id);
         const subagent = this.require(target);
         const session = subagent.agent?.session;
         const messages = session ? [...session.messages] : loadTranscriptFile(subagent.sessionFile);
@@ -68,6 +95,23 @@ export class SessionRuntime {
                 output: subagent.output,
                 activity: subagent.activity,
                 subagents: subagent.subagents ?? [],
+            });
+        }
+        for (const task of this.tasks.list()) {
+            if (task.status !== "running")
+                continue;
+            active.push({
+                id: task.id,
+                name: task.name,
+                status: task.status === "running" ? "running" : "idle",
+                taskStatus: task.status,
+                kind: "task",
+                command: `$ ${task.command}`,
+                output: task.last_line ?? undefined,
+                activity: task.status === "running"
+                    ? `running ${formatDuration(task.duration_ms)}`
+                    : task.status,
+                subagents: [],
             });
         }
         return active;
@@ -209,6 +253,34 @@ export class SessionRuntime {
             throw new Error("Invalid pi-rlm-runtime request");
         const req = value;
         switch (req.type) {
+            case "bg.run": {
+                const command = text(req.command, "command", MAX_PROMPT);
+                const name = req.name == null ? undefined : agentName(req.name, "name");
+                const cwd = req.cwd == null ? undefined : resolveTaskCwd(req.cwd, this.ctx.cwd);
+                const timeoutSeconds = positiveInteger(req.timeout_seconds, "timeout_seconds");
+                return this.tasks.start({
+                    command,
+                    ...(name ? { name } : {}),
+                    ...(cwd ? { cwd } : {}),
+                    ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+                    notify: req.notify !== false,
+                });
+            }
+            case "bg.list":
+                return this.tasks.list();
+            case "bg.status":
+                return this.tasks.status(req.task == null ? undefined : text(req.task, "task", MAX_NAME));
+            case "bg.logs": {
+                const target = text(req.task, "task", MAX_NAME);
+                const maxBytes = req.max_bytes === undefined ? undefined : positiveInteger(req.max_bytes, "max_bytes");
+                return this.tasks.logs(target, { ...(maxBytes === undefined ? {} : { maxBytes }), tail: req.tail !== false });
+            }
+            case "bg.kill":
+                return await this.tasks.kill(text(req.task, "task", MAX_NAME));
+            case "bg.wait": {
+                const timeoutSeconds = req.timeout_seconds === undefined ? undefined : positiveInteger(req.timeout_seconds, "timeout_seconds");
+                return await this.tasks.wait(text(req.task, "task", MAX_NAME), signal, timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000);
+            }
             case "rlm.run": {
                 const starting = this.spawn(text(req.prompt, "prompt", MAX_PROMPT), req.name == null ? undefined : agentName(req.name, "name"), req.model == null ? undefined : text(req.model, "model"), signal);
                 this.starting.add(starting);
@@ -248,6 +320,7 @@ export class SessionRuntime {
         if (this.closed)
             return;
         this.closed = true;
+        await this.tasks.dispose();
         await this.kernel?.dispose().catch(() => undefined);
         this.kernel = undefined;
         await Promise.allSettled(this.starting);
@@ -272,7 +345,7 @@ export class SessionRuntime {
         }
         if (!model)
             throw new Error("Select a Pi model before creating a sub-agent");
-        if (subagentName && (this.findSubagent(subagentName) || this.reservedNames.has(subagentName))) {
+        if (subagentName && (this.findSubagent(subagentName) || this.tasks.hasName(subagentName) || this.reservedNames.has(subagentName))) {
             throw new Error(`A direct sub-agent named ${JSON.stringify(subagentName)} already exists`);
         }
         if (subagentName)
@@ -731,6 +804,19 @@ function modelOf(ctx, selector) {
     if (!model)
         throw new Error(`Sub-agent model is unavailable: ${selector}`);
     return model;
+}
+function resolveTaskCwd(value, sessionCwd) {
+    if (typeof value !== "string" || !value.trim())
+        throw new Error("cwd must be a non-empty string");
+    const cwd = value.trim();
+    return isAbsolute(cwd) ? cwd : join(sessionCwd, cwd);
+}
+function positiveInteger(value, label) {
+    if (value === undefined || value === null)
+        return undefined;
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
+        throw new Error(`${label} must be a positive integer`);
+    return value;
 }
 function roleOf(value) {
     if (value === "parent" || value === "sibling" || value === "subagent")
