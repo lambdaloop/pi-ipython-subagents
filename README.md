@@ -37,7 +37,7 @@ The default depth is 4. The supported range is 0–16.
 
 ## View active sub-agents
 
-Active sub-agents appear as a nested tree above the editor. Press `Ctrl+Alt+A` or run `/subagents` to expand or collapse it. When expanded, the tree also shows each RLM sub-agent's current tool, command, and latest output. Dormant sub-agents are hidden, and expanded trees are capped at 12 agents. Use `/subagent` (or `Ctrl+Alt+S`) to select an RLM sub-agent and browse its transcript in a live scrolling overlay; pass a name as `/subagent NAME` to open it directly.
+Active sub-agents appear as a nested tree above the editor. Press `Ctrl+Alt+A` or run `/subagents` to expand or collapse it. When expanded, the tree also shows each RLM sub-agent's current tool, command, and latest output. Dormant sub-agents are hidden, and expanded trees are capped at 12 agents. Press `Shift+↑`/`Shift+↓` to select the previous or next active sub-agent or background task; press `Enter` to browse the selected transcript in a live scrolling overlay. Use `/subagent` (or `Ctrl+Alt+S`) to choose one interactively, or pass a name as `/subagent NAME` to open it directly.
 
 ## Agent API
 

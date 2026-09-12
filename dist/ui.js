@@ -175,7 +175,7 @@ export async function browseSubagent(ctx, runtime, requestedName) {
         overlayOptions: { width: "94%", maxHeight: "88%", anchor: "center" },
     });
 }
-export function showSubagents(ctx, runtime, expanded) {
+export function showSubagents(ctx, runtime, expanded, selectedName) {
     if (!ctx.hasUI)
         return;
     const view = subagentTreeView(runtime?.listActiveSubagents() ?? []);
@@ -184,25 +184,27 @@ export function showSubagents(ctx, runtime, expanded) {
         return;
     }
     const header = `${expanded ? "▾" : "▸"} Sub-agents · ${view.running} running · ${view.total} active`;
-    const lines = [ctx.ui.theme.fg("muted", `${header}  Ctrl+Alt+A`)];
+    const hint = "Shift+↑/↓ select · Enter open · Ctrl+Alt+A";
+    const lines = [ctx.ui.theme.fg("muted", `${header}  ${hint}`)];
     if (expanded) {
         for (const { prefix, subagent } of view.rows)
-            lines.push(...formatSubagent(ctx, prefix, subagent));
+            lines.push(...formatSubagent(ctx, prefix, subagent, subagent.name === selectedName));
         if (view.rows.length < view.total)
             lines.push(ctx.ui.theme.fg("dim", `   … ${view.total - view.rows.length} more`));
     }
     ctx.ui.setWidget(SUBAGENTS_WIDGET, lines);
 }
-function formatSubagent(ctx, prefix, subagent) {
+function formatSubagent(ctx, prefix, subagent, selected = false) {
     const isTask = subagent.kind === "task";
     const state = isTask
         ? ctx.ui.theme.fg(subagent.taskStatus === "failed" ? "error" : subagent.taskStatus === "completed" ? "success" : "muted", `◆ ${subagent.taskStatus ?? subagent.status}`)
         : subagent.status === "running" ? ctx.ui.theme.fg("success", "● running") : ctx.ui.theme.fg("muted", "idle");
     const detail = [subagent.command, subagent.output && `↳ ${subagent.output}`].filter(Boolean).join(" · ");
-    const lines = [`${ctx.ui.theme.fg("dim", prefix)}${ctx.ui.theme.fg("text", subagent.name)} ${ctx.ui.theme.fg("dim", "·")} ${state}${subagent.activity ? ` ${ctx.ui.theme.fg("dim", `(${subagent.activity})`)}` : ""}`];
+    const marker = selected ? ctx.ui.theme.fg("accent", "▶ ") : "  ";
+    const lines = [`${marker}${ctx.ui.theme.fg("dim", prefix)}${ctx.ui.theme.fg("text", subagent.name)} ${ctx.ui.theme.fg("dim", "·")} ${state}${subagent.activity ? ` ${ctx.ui.theme.fg("dim", `(${subagent.activity})`)}` : ""}`];
     if (detail) {
         const continuation = prefix.replace(/[├└]─ /, "   ");
-        lines.push(`${ctx.ui.theme.fg("dim", continuation)}${ctx.ui.theme.fg("muted", detail)}`);
+        lines.push(`  ${ctx.ui.theme.fg("dim", continuation)}${ctx.ui.theme.fg("muted", detail)}`);
     }
     return lines;
 }

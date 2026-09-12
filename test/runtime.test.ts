@@ -19,6 +19,7 @@ function mockPi() {
 	const flags = new Map();
 	let active = ["read", "bash", "edit", "write"];
 	const tools = [];
+	const shortcuts = new Map();
 	const pi = {
 		registerFlag(name, options) {
 			flags.set(name, options.default);
@@ -27,7 +28,9 @@ function mockPi() {
 			return flags.get(name);
 		},
 		registerCommand() {},
-		registerShortcut() {},
+		registerShortcut(name, options) {
+			shortcuts.set(name, options);
+		},
 		registerTool(tool) {
 			tools.push(tool.name);
 		},
@@ -44,7 +47,7 @@ function mockPi() {
 			events.set(name, handler);
 		},
 	};
-	return { pi, events, flags, tools, get active() { return active; } };
+	return { pi, events, flags, tools, shortcuts, get active() { return active; } };
 }
 
 test("RLM is enabled by default and preserves native tools", async () => {
@@ -130,6 +133,75 @@ test("background tasks are marked distinctly in the sub-agent tree", () => {
 	}, true);
 	assert.match(widget.join("\n"), /tests.*◆ completed/);
 	assert.match(widget.join("\n"), /\$ printf done/);
+});
+
+test("Shift+Up/Down selects a sub-agent and Enter opens its transcript", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-selection-"));
+	const active = [
+		{ name: "alpha", status: "running", subagents: [] },
+		{ name: "beta", status: "running", subagents: [] },
+	];
+	const mock = mockPi();
+	let widget: string[] = [];
+	let terminalInput: ((data: string) => { consume?: boolean; data?: string } | undefined) | undefined;
+	let editorText = "";
+	let customCalls = 0;
+	const ctx = {
+		cwd: root,
+		hasUI: true,
+		mode: "tui",
+		isIdle: () => true,
+		isProjectTrusted: () => true,
+		model: undefined,
+		thinkingLevel: "off",
+		sessionManager: {
+			getBranch: () => [],
+			getSessionId: () => "selection-test",
+			getSessionFile: () => undefined,
+		},
+		ui: {
+			theme: { fg: (_color, text) => text },
+			setWidget: (_id, value) => { widget = value; },
+			notify() {},
+			onTerminalInput: (handler) => {
+				terminalInput = handler;
+				return () => { terminalInput = undefined; };
+			},
+			custom: async () => { customCalls++; },
+			getEditorText: () => editorText,
+		},
+	};
+	const originalActive = SessionRuntime.prototype.listActiveSubagents;
+	const originalInspectable = SessionRuntime.prototype.listInspectable;
+	SessionRuntime.prototype.listActiveSubagents = () => active;
+	SessionRuntime.prototype.listInspectable = () => active.map((item) => ({ ...item, kind: "agent" }));
+	try {
+		piRlmRuntime(mock.pi);
+		await mock.events.get("before_agent_start")(
+			{ systemPrompt: "BASE", systemPromptOptions: { cwd: root } },
+			ctx,
+		);
+		assert.equal(typeof terminalInput, "function");
+		await mock.shortcuts.get("shift+down").handler(ctx);
+		assert.match(widget.join("\n"), /▶ .*alpha/);
+		editorText = "hello";
+		assert.equal(terminalInput("\r"), undefined);
+		assert.doesNotMatch(widget.join("\n"), /▶ /);
+		editorText = "";
+		await mock.shortcuts.get("shift+down").handler(ctx);
+		await mock.shortcuts.get("shift+down").handler(ctx);
+		assert.match(widget.join("\n"), /▶ .*beta/);
+		assert.equal(terminalInput("\r")?.consume, true);
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(customCalls, 1);
+		assert.doesNotMatch(widget.join("\n"), /▶ /);
+		assert.equal(terminalInput("\r"), undefined);
+		await mock.events.get("session_shutdown")({}, ctx);
+	} finally {
+		SessionRuntime.prototype.listActiveSubagents = originalActive;
+		SessionRuntime.prototype.listInspectable = originalInspectable;
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("subagent browser scrolls, preserves position, supports wheel, and cleans up", async () => {

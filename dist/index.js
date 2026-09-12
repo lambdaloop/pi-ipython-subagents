@@ -1,13 +1,15 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAgentDir, } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { buildPiRlmRuntimePrompt } from "./prompt.js";
+import { createIpythonRenderers } from "./render.js";
 import { SessionRuntime } from "./session.js";
 import { loadRecursion, MAX_DEPTH } from "./state.js";
 import { SUBAGENT_EXTENSION_NAME } from "./subagent.js";
-import { createIpythonRenderers } from "./render.js";
-import { browseSubagent, showSubagents } from "./ui.js";
+import { browseSubagent, showSubagents, subagentTreeView } from "./ui.js";
+
 const IPYTHON_TOOL = "ipython";
 const RUNTIME_FLAG = "rlm-runtime";
 const NO_RUNTIME_FLAG = "no-rlm-runtime";
@@ -52,17 +54,65 @@ function bindExtension(pi, subagent, registerStop) {
     let uiContext;
     let toolRegistered = false;
     let subagentsExpanded = false;
+    let selectedSubagent;
+    let unsubscribeSelectionInput;
     const enabled = () => subagent !== undefined || (pi.getFlag(RUNTIME_FLAG) === true && pi.getFlag(NO_RUNTIME_FLAG) !== true);
     const stopRuntime = async () => {
         const current = runtime;
         runtime = undefined;
         await current?.dispose();
     };
-    registerStop?.(stopRuntime);
+    const activeRows = (live) => subagentTreeView(live?.listActiveSubagents() ?? [], Number.MAX_SAFE_INTEGER).rows;
+    const redrawSubagents = (ctx, live, expanded = subagentsExpanded) => {
+        if (selectedSubagent && !activeRows(live).some(({ subagent: item }) => item.name === selectedSubagent))
+            selectedSubagent = undefined;
+        showSubagents(ctx, live, expanded, selectedSubagent);
+    };
+    const clearSelection = (ctx) => {
+        if (!selectedSubagent)
+            return;
+        selectedSubagent = undefined;
+        if (runtime)
+            redrawSubagents(ctx, runtime);
+    };
+    const ensureSelectionInput = (ctx) => {
+        if (subagent || unsubscribeSelectionInput || !ctx.hasUI || ctx.mode !== "tui" || typeof ctx.ui.onTerminalInput !== "function")
+            return;
+        unsubscribeSelectionInput = ctx.ui.onTerminalInput((data) => {
+            const selected = selectedSubagent;
+            if (!selected)
+                return;
+            if (matchesKey(data, Key.enter)) {
+                const editorText = ctx.ui.getEditorText?.() ?? "";
+                if (editorText.trim()) {
+                    clearSelection(ctx);
+                    return;
+                }
+                selectedSubagent = undefined;
+                const live = runtime;
+                if (live)
+                    redrawSubagents(ctx, live);
+                if (live)
+                    void browseSubagent(ctx, live, selected);
+                return { consume: true };
+            }
+            if (matchesKey(data, Key.escape)) {
+                clearSelection(ctx);
+            }
+        });
+    };
+    registerStop?.(async () => {
+        unsubscribeSelectionInput?.();
+        unsubscribeSelectionInput = undefined;
+        selectedSubagent = undefined;
+        await stopRuntime();
+    });
     const runtimeFor = (ctx) => {
         uiContext = ctx;
         if (runtime) {
             runtime.updateContext(ctx);
+            if (!subagent)
+                ensureSelectionInput(ctx);
             return runtime;
         }
         const recursion = subagent ??
@@ -81,21 +131,43 @@ function bindExtension(pi, subagent, registerStop) {
             ...(subagent ? { runtime: subagent.runtime } : {}),
             subagentsChanged: () => {
                 if (runtime && uiContext)
-                    showSubagents(uiContext, runtime, subagentsExpanded);
+                    redrawSubagents(uiContext, runtime);
             },
             makeExtension: createPiRlmRuntimeExtension,
         });
-        showSubagents(ctx, runtime, subagentsExpanded);
+        if (!subagent)
+            ensureSelectionInput(ctx);
+        redrawSubagents(ctx, runtime);
         return runtime;
     };
     if (!subagent) {
+        const stepSubagentSelection = (ctx, direction) => {
+            const live = runtimeFor(ctx);
+            const rows = activeRows(live);
+            if (!rows.length) {
+                selectedSubagent = undefined;
+                ctx.ui.notify("No active sub-agents or background tasks", "info");
+                redrawSubagents(ctx, live);
+                return;
+            }
+            const names = rows.map(({ subagent: item }) => item.name);
+            let currentIndex = names.indexOf(selectedSubagent ?? "");
+            if (currentIndex < 0)
+                currentIndex = direction > 0 ? -1 : 0;
+            selectedSubagent = names[(currentIndex + direction + names.length) % names.length];
+            subagentsExpanded = true;
+            ensureSelectionInput(ctx);
+            redrawSubagents(ctx, live, true);
+        };
         const toggleSubagents = (ctx) => {
             if (!runtime?.listActiveSubagents().length) {
                 ctx.ui.notify("No active sub-agents or background tasks", "info");
                 return;
             }
             subagentsExpanded = !subagentsExpanded;
-            showSubagents(ctx, runtime, subagentsExpanded);
+            if (!subagentsExpanded)
+                selectedSubagent = undefined;
+            redrawSubagents(ctx, runtime);
         };
         pi.registerCommand("subagents", {
             description: "Toggle the active sub-agent tree",
@@ -112,6 +184,14 @@ function bindExtension(pi, subagent, registerStop) {
         pi.registerShortcut("ctrl+alt+a", {
             description: "Toggle the active sub-agent tree",
             handler: toggleSubagents,
+        });
+        pi.registerShortcut("shift+up", {
+            description: "Select the previous sub-agent or background task",
+            handler: async (ctx) => stepSubagentSelection(ctx, -1),
+        });
+        pi.registerShortcut("shift+down", {
+            description: "Select the next sub-agent or background task",
+            handler: async (ctx) => stepSubagentSelection(ctx, 1),
         });
     }
     const registerIpythonTool = () => {
@@ -227,10 +307,15 @@ function bindExtension(pi, subagent, registerStop) {
         uiContext = ctx;
         if (runtime)
             await runtime.refresh(ctx);
-        else
+        else {
+            selectedSubagent = undefined;
             showSubagents(ctx, undefined, subagentsExpanded);
+        }
     });
     pi.on("session_shutdown", async (_event, ctx) => {
+        unsubscribeSelectionInput?.();
+        unsubscribeSelectionInput = undefined;
+        selectedSubagent = undefined;
         await stopRuntime();
         showSubagents(ctx, undefined, subagentsExpanded);
     });
