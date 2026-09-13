@@ -96,6 +96,7 @@ export class BackgroundTasks {
         task.timeout = setTimeout(() => {
             void this.kill(task.id, "timeout");
         }, timeoutSeconds * 1000);
+        task.timeout.unref?.();
         return this.snapshot(task);
     }
     list() {
@@ -236,7 +237,10 @@ export class BackgroundTasks {
         const exit = task.exit_code === null ? task.signal ? `signal ${task.signal}` : task.status : `exit ${task.exit_code}`;
         const duration = `${(task.duration_ms / 1000).toFixed(1)}s`;
         const preview = task.last_line ? `\n\nLast output: ${task.last_line}` : "";
-        return `Background task ${outcome}: ${task.name} (${exit} in ${duration})\nCommand: ${task.command}\nLog: ${task.log_path}${preview}`.slice(0, MAX_MESSAGE);
+        const timeoutNote = task.error === "Background task timed out"
+            ? "\nHit its time limit. Re-run with bg(\"...\", timeout_seconds=<n>) for longer work."
+            : "";
+        return `Background task ${outcome}: ${task.name} (${exit} in ${duration})${timeoutNote}\nCommand: ${task.command}\nLog: ${task.log_path}${preview}`.slice(0, MAX_MESSAGE);
     }
     signal(task, signal) {
         if (task.status !== "running")
