@@ -377,9 +377,10 @@ class Background:
         *,
         name: str | None = None,
         cwd: str | None = None,
-        timeout_seconds: int | None = None,
+        timeout_seconds: int | None = 60,
         notify: bool = True,
     ) -> BackgroundTask:
+        """Start a command; it is killed after 60s unless timeout_seconds is raised."""
         return _background_task(
             await _request(
                 "bg.run",

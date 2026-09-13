@@ -89,6 +89,9 @@ test("sub-agent policy leaves only ipython and the prompt distinguishes session 
 	assert.match(subPrompt, /Never search .* as roots/);
 	assert.match(mainPrompt, /20 seconds by default/);
 	assert.match(subPrompt, /20 seconds by default/);
+	assert.match(mainPrompt, /60 seconds by default/);
+	assert.match(subPrompt, /60 seconds by default/);
+	assert.match(mainPrompt, /timeout_seconds=1800/);
 	assert.doesNotMatch(subPrompt, /parent session keeps its full tool set/);
 	assert.match(BOOTSTRAP, /rg_files/);
 	assert.match(BOOTSTRAP, /rg_search/);
@@ -350,6 +353,26 @@ function makeBackgroundTasks() {
 	});
 	return { root, tasks, notifications };
 }
+
+test("background tasks default to a 60-second process timeout", async () => {
+	const { root, tasks } = makeBackgroundTasks();
+	const originalSetTimeout = globalThis.setTimeout;
+	let timeoutMs;
+	globalThis.setTimeout = ((handler, delayMs, ...args) => {
+		if (delayMs === 60_000)
+			timeoutMs = delayMs;
+		return originalSetTimeout(handler, delayMs, ...args);
+	});
+	try {
+		const started = tasks.start({ command: "sleep 1", name: "default-timeout" });
+		assert.equal(timeoutMs, 60_000);
+		await tasks.wait(started.id);
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+		await tasks.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("background tasks return handles, capture logs, and notify on completion", async () => {
 	const { root, tasks, notifications } = makeBackgroundTasks();

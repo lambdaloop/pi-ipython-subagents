@@ -9,6 +9,7 @@ const MAX_LOG_BYTES = 50_000;
 const MAX_PREVIEW_BYTES = 64 * 1024;
 const KILL_GRACE_MS = 3_000;
 const MAX_MESSAGE = 16_384;
+const DEFAULT_TIMEOUT_SECONDS = 60;
 
 export class BackgroundTasks {
     tasks = new Map();
@@ -21,7 +22,8 @@ export class BackgroundTasks {
         if (running >= MAX_TASKS)
             throw new Error(`Too many background tasks are running (maximum ${MAX_TASKS})`);
         const command = text(options.command, "command");
-        if (options.timeoutSeconds !== undefined && (!Number.isInteger(options.timeoutSeconds) || options.timeoutSeconds <= 0))
+        const timeoutSeconds = options.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
+        if (!Number.isInteger(timeoutSeconds) || timeoutSeconds <= 0)
             throw new Error("timeout_seconds must be a positive integer");
         const name = taskName(options.name, command);
         if ([...this.tasks.values()].some((task) => task.name === name))
@@ -91,11 +93,9 @@ export class BackgroundTasks {
             const finalStatus = task.killReason === "timeout" ? "failed" : task.killReason ? "killed" : code === 0 ? "completed" : "failed";
             this.finish(task, finalStatus, code, signal);
         });
-        if (options.timeoutSeconds !== undefined) {
-            task.timeout = setTimeout(() => {
-                void this.kill(task.id, "timeout");
-            }, options.timeoutSeconds * 1000);
-        }
+        task.timeout = setTimeout(() => {
+            void this.kill(task.id, "timeout");
+        }, timeoutSeconds * 1000);
         return this.snapshot(task);
     }
     list() {
