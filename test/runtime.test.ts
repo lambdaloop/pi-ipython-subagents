@@ -6,7 +6,7 @@ import test from "node:test";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { BackgroundTasks } from "../dist/background.js";
 import piRlmRuntime, { syncActiveTools } from "../dist/index.js";
-import { createKernelRuntime } from "../dist/kernel.js";
+import { BOOTSTRAP, createKernelRuntime } from "../dist/kernel.js";
 import { buildPiRlmRuntimePrompt } from "../dist/prompt.js";
 import { createIpythonRenderers } from "../dist/render.js";
 import { SessionRuntime } from "../dist/session.js";
@@ -32,10 +32,10 @@ function mockPi() {
 			shortcuts.set(name, options);
 		},
 		registerTool(tool) {
-			tools.push(tool.name);
+			tools.push(tool);
 		},
 		getAllTools() {
-			return tools.map((name) => ({ name }));
+			return tools.map((tool) => ({ name: tool.name }));
 		},
 		getActiveTools() {
 			return [...active];
@@ -83,7 +83,15 @@ test("sub-agent policy leaves only ipython and the prompt distinguishes session 
 	});
 	assert.match(mainPrompt, /other native Pi tools stay enabled/);
 	assert.match(subPrompt, /only direct tool/);
+	assert.match(mainPrompt, /rg_files\(\.\.\.\)/);
+	assert.match(mainPrompt, /rg_search\(\.\.\.\)/);
+	assert.match(mainPrompt, /Never search .* as roots/);
+	assert.match(subPrompt, /Never search .* as roots/);
+	assert.match(mainPrompt, /20 seconds by default/);
+	assert.match(subPrompt, /20 seconds by default/);
 	assert.doesNotMatch(subPrompt, /parent session keeps its full tool set/);
+	assert.match(BOOTSTRAP, /rg_files/);
+	assert.match(BOOTSTRAP, /rg_search/);
 });
 
 test("RLM appends its prompt and shuts down cleanly", async () => {
@@ -107,6 +115,10 @@ test("RLM appends its prompt and shuts down cleanly", async () => {
 	assert.equal((result.systemPrompt.match(/BASE_SENTINEL/g) ?? []).length, 1);
 	assert.match(result.systemPrompt, /Kernel environments: the first line of a cell may be `%%kernel`/);
 	assert.match(result.systemPrompt, /`ipython` is your primary tool/);
+	assert.match(result.systemPrompt, /rg_files/);
+	const ipython = mock.tools.find((tool) => tool.name === "ipython");
+	assert.equal(ipython.parameters.properties.timeout_seconds.minimum, 1);
+	assert.equal(ipython.parameters.properties.timeout_seconds.maximum, 3600);
 	await mock.events.get("session_shutdown")({}, ctx);
 });
 
@@ -625,6 +637,25 @@ test("the %%kernel directive only applies on the first line", async () => {
 	finally {
 		await runtime.dispose();
 	}
+});
+
+test("the sub-agent panel shows live elapsed time for a running command", () => {
+	const active = SessionRuntime.prototype.listActiveSubagents.call({
+		subagents: new Map([[
+			"agent-1",
+			{
+				sessionId: "agent-1",
+				name: "worker",
+				model: "test/model",
+				agent: { session: { isStreaming: true } },
+				toolName: "ipython",
+				toolStartedAt: Date.now() - 5000,
+				command: "$ rg -n pattern src",
+			},
+		]]),
+		tasks: { list: () => [] },
+	});
+	assert.match(active[0].activity, /^running ipython 5\.0s$/);
 });
 
 test("the ipython row renders like a shell command with elapsed and total time", () => {

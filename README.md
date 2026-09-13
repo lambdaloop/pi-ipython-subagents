@@ -65,6 +65,8 @@ await rlm.delete_subagent(reviewer)
 
 `rlm.find_models()` searches the authenticated models available to Pi. Its selectors are exact; requesting an unavailable model fails instead of choosing a fallback.
 
+For repository discovery, the runtime also preloads bounded ripgrep helpers. Use `rg_files('*.py')` to list files and `rg_search('pattern', 'src', glob='*.py')` to search contents; both are synchronous plain functions.
+
 `agent_message.send()` accepts `parent`, `sibling`, or `subagent` as `receiver_role`. Messages to more distant agents are relayed through the tree.
 
 ## Background tasks
@@ -108,7 +110,11 @@ The interpreter must provide IPython and ipykernel.
 
 The `ipython` row is rendered like a shell command: the cell heads the row with a `$` prompt, output
 previews below it (expandable), and a footer counts `Elapsed 1.2s` while the cell runs and reports
-`Took 3.2s` when it finishes.
+`Took 3.2s` when it finishes. Cells are interrupted after 20 seconds by default; pass
+`timeout_seconds` explicitly for a slower cell and use `bg(...)` for genuinely long-running work.
+
+The active sub-agent panel refreshes running command durations continuously, including commands that
+have not produced output yet.
 
 ## Kernel environments
 

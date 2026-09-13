@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shlex
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -59,6 +63,36 @@ class BackgroundLogs:
 
 
 @dataclass(frozen=True, slots=True)
+class FileList:
+    paths: tuple[str, ...]
+    truncated: bool
+    command: str
+
+    def __str__(self) -> str:
+        lines = list(self.paths)
+        if self.truncated:
+            lines.append("… output truncated; narrow with path= or glob=")
+        return "\n".join(lines) or "(no files found)"
+
+    __repr__ = __str__
+
+
+@dataclass(frozen=True, slots=True)
+class SearchResult:
+    matches: tuple[str, ...]
+    truncated: bool
+    command: str
+
+    def __str__(self) -> str:
+        lines = list(self.matches)
+        if self.truncated:
+            lines.append("… output truncated; narrow with path= or glob=")
+        return "\n".join(lines) or "(no matches)"
+
+    __repr__ = __str__
+
+
+@dataclass(frozen=True, slots=True)
 class BackgroundTask:
     id: str
     name: str
@@ -88,8 +122,130 @@ class BackgroundTask:
         return await bg.wait(self, timeout_seconds=timeout_seconds)
 
 
+_RG_TIMEOUT_SECONDS = 60
+_RG_MAX_LINE_CHARS = 400
+_RG_DEFAULT_MAX_FILES = 200
+_RG_DEFAULT_MAX_MATCHES = 100
+
+
+def _positive_integer(value: int, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _search_path(path: str) -> str:
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("path must be a non-empty string")
+    expanded = os.path.expanduser(path)
+    resolved = os.path.realpath(expanded)
+    home = os.path.realpath(os.path.expanduser("~"))
+    if resolved in {"/", "/home", home}:
+        raise ValueError(f"Scope the search to the project or an explicit subdirectory; {resolved} is too large")
+    return expanded
+
+
+def _rg_binary() -> str:
+    binary = shutil.which("rg")
+    if binary:
+        return binary
+    managed = os.path.expanduser("~/.pi/agent/bin/rg")
+    if os.access(managed, os.X_OK):
+        return managed
+    raise RuntimeError("ripgrep (rg) is not installed or not on PATH")
+
+
+def _run_rg(args: list[str], limit: int) -> tuple[list[str], bool, str]:
+    binary = _rg_binary()
+    command = shlex.join([binary, *args])
+    try:
+        result = subprocess.run(
+            [binary, *args],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_RG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"rg timed out after {_RG_TIMEOUT_SECONDS}s; narrow the search path or glob") from error
+    if result.returncode not in (0, 1):
+        message = result.stderr.strip() or f"rg exited with status {result.returncode}"
+        raise RuntimeError(message)
+    raw_lines = result.stdout.splitlines()
+    truncated = len(raw_lines) > limit
+    lines = [line[:_RG_MAX_LINE_CHARS] for line in raw_lines[:limit]]
+    return lines, truncated, command
+
+
+def rg_files(
+    glob: str | None = None,
+    path: str = ".",
+    *,
+    hidden: bool = False,
+    no_ignore: bool = False,
+    max_files: int = _RG_DEFAULT_MAX_FILES,
+) -> FileList:
+    """List project files with rg --files, bounded for model context."""
+    max_files = _positive_integer(max_files, "max_files")
+    scoped_path = _search_path(path)
+    args = ["--files"]
+    if hidden:
+        args.append("--hidden")
+    if no_ignore:
+        args.append("--no-ignore")
+    if glob is not None:
+        if not isinstance(glob, str) or not glob:
+            raise ValueError("glob must be a non-empty string or None")
+        args.extend(["-g", glob])
+    args.extend(["--", scoped_path])
+    lines, truncated, command = _run_rg(args, max_files)
+    return FileList(tuple(lines), truncated, command)
+
+
+def rg_search(
+    pattern: str,
+    path: str = ".",
+    *,
+    glob: str | None = None,
+    literal: bool = False,
+    ignore_case: bool = False,
+    context: int = 0,
+    max_matches: int = _RG_DEFAULT_MAX_MATCHES,
+    hidden: bool = False,
+    no_ignore: bool = False,
+) -> SearchResult:
+    """Search project contents with rg, bounded for model context."""
+    if not isinstance(pattern, str) or not pattern:
+        raise ValueError("pattern must be a non-empty string")
+    max_matches = _positive_integer(max_matches, "max_matches")
+    if not isinstance(context, int) or isinstance(context, bool) or context < 0:
+        raise ValueError("context must be a non-negative integer")
+    scoped_path = _search_path(path)
+    args = ["--line-number", "--no-heading", "--color", "never"]
+    if hidden:
+        args.append("--hidden")
+    if no_ignore:
+        args.append("--no-ignore")
+    if literal:
+        args.append("--fixed-strings")
+    if ignore_case:
+        args.append("--ignore-case")
+    if context:
+        args.extend(["-C", str(context)])
+    if glob is not None:
+        if not isinstance(glob, str) or not glob:
+            raise ValueError("glob must be a non-empty string or None")
+        args.extend(["-g", glob])
+    args.extend(["--", pattern, scoped_path])
+    lines, truncated, command = _run_rg(args, max_matches)
+    return SearchResult(tuple(lines), truncated, command)
+
+
 def _install_control_handlers() -> None:
-    kernel = get_ipython().kernel
+    ip = get_ipython()
+    if ip is None:
+        return
+    kernel = ip.kernel
     kernel.control_handlers.setdefault("comm_msg", kernel.comm_manager.comm_msg)
     kernel.control_handlers.setdefault("comm_close", kernel.comm_manager.comm_close)
 
@@ -386,10 +542,14 @@ __all__ = [
     "AgentList",
     "BackgroundLogs",
     "BackgroundTask",
+    "FileList",
     "RelatedAgent",
     "RLMModel",
+    "SearchResult",
     "Subagent",
     "agent_message",
     "bg",
+    "rg_files",
+    "rg_search",
     "rlm",
 ]

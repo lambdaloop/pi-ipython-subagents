@@ -25,8 +25,8 @@ const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 const TRUNCATED = "\n… output truncated …";
 const TRUNCATED_BYTES = Buffer.byteLength(TRUNCATED);
-const BOOTSTRAP = `%colors NoColor
-from pi_rlm_runtime import agent_message, bg, rlm`;
+export const BOOTSTRAP = `%colors NoColor
+from pi_rlm_runtime import agent_message, bg, rg_files, rg_search, rlm`;
 export function retainExecutionOwner(owners, requestMsgId) {
     for (const [id, owner] of owners) {
         if (id === requestMsgId)
@@ -310,8 +310,8 @@ export class SessionKernel {
     constructor(runtime) {
         this.runtime = runtime;
     }
-    execute(code, host, signal, onUpdate) {
-        const run = this.sequence.then(() => this.executeCell(code, host, signal, onUpdate));
+    execute(code, host, signal, onUpdate, timeoutMs) {
+        const run = this.sequence.then(() => this.executeCell(code, host, signal, onUpdate, timeoutMs));
         this.sequence = run.then(() => undefined, () => undefined);
         return run;
     }
@@ -326,7 +326,7 @@ export class SessionKernel {
         await start?.catch(() => undefined);
         await this.closeKernel(new Error("IPython kernel shut down"));
     }
-    async executeCell(code, host, signal, onUpdate) {
+    async executeCell(code, host, signal, onUpdate, timeoutMs) {
         if (this.closed)
             throw new Error("IPython kernel is closed");
         if (Buffer.byteLength(code) > MAX_CODE_BYTES)
@@ -341,9 +341,9 @@ export class SessionKernel {
         if (!this.shell || !this.connection) {
             throw new Error("IPython kernel connection is unavailable");
         }
-        return this.runCell(code, host, signal, onUpdate, false);
+        return this.runCell(code, host, signal, onUpdate, false, timeoutMs);
     }
-    async runCell(code, host, signal, onUpdate, silent) {
+    async runCell(code, host, signal, onUpdate, silent, timeoutMs) {
         const conn = this.connection;
         const shell = this.shell;
         if (!conn || !shell)
@@ -397,6 +397,14 @@ export class SessionKernel {
             abortTimer = setTimeout(forceAbort, INTERRUPT_GRACE_MS);
             abortTimer.unref?.();
         };
+        let timedOut = false;
+        const cellTimer = timeoutMs
+            ? setTimeout(() => {
+                timedOut = true;
+                onAbort();
+            }, timeoutMs)
+            : undefined;
+        cellTimer?.unref?.();
         signal?.addEventListener("abort", onAbort, { once: true });
         if (signal?.aborted)
             onAbort();
@@ -418,6 +426,17 @@ export class SessionKernel {
             return cell;
         }
         catch (error) {
+            if (timedOut) {
+                if (!sent && !execution.settled) {
+                    this.releaseExecution(execution);
+                    this.executionOwners.delete(requestMsgId);
+                    controller.abort();
+                    execution.settled = true;
+                }
+                const timeout = new Error(`IPython cell exceeded its ${Math.round(timeoutMs / 1000)}s time limit and was interrupted. Re-run with timeout_seconds=<n> for a longer cell, or start it with bg("...") for genuinely long work.`);
+                timeout.name = "CellTimeout";
+                throw timeout;
+            }
             if (sent)
                 throw error;
             if (execution.settled)
@@ -431,6 +450,8 @@ export class SessionKernel {
         finally {
             if (abortTimer)
                 clearTimeout(abortTimer);
+            if (cellTimer)
+                clearTimeout(cellTimer);
             signal?.removeEventListener("abort", onAbort);
         }
     }

@@ -93,7 +93,9 @@ export class SessionRuntime {
                 status: currentStatus,
                 command: subagent.command,
                 output: subagent.output,
-                activity: subagent.activity,
+                activity: subagent.toolName && subagent.toolStartedAt
+                    ? `running ${subagent.toolName} ${formatDuration(Date.now() - subagent.toolStartedAt)}`
+                    : subagent.activity,
                 subagents: subagent.subagents ?? [],
             });
         }
@@ -147,13 +149,13 @@ export class SessionRuntime {
             await subagent.agent?.close();
         }));
     }
-    execute(code, signal, onUpdate) {
+    execute(code, signal, onUpdate, timeoutMs) {
         this.open();
         const directive = parseKernelDirective(code);
         if (directive !== undefined)
             return this.runKernelDirective(directive);
         this.kernel ??= new SessionKernel(this.kernels);
-        return this.kernel.execute(code, this, signal, onUpdate);
+        return this.kernel.execute(code, this, signal, onUpdate, timeoutMs);
     }
     /**
      * Host-side handling for the `%%kernel` directive: the kernel cannot restart
@@ -768,6 +770,11 @@ function trimActivity(value, limit = 180) {
     return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
 function formatDuration(milliseconds) {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+    if (seconds >= 3600)
+        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m ${seconds % 60}s`;
+    if (seconds >= 60)
+        return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
     return milliseconds < 1000 ? `${Math.max(0, Math.round(milliseconds))}ms` : `${(milliseconds / 1000).toFixed(1)}s`;
 }
 function summarizeOutput(value) {

@@ -15,6 +15,7 @@ const RUNTIME_FLAG = "rlm-runtime";
 const NO_RUNTIME_FLAG = "no-rlm-runtime";
 const MAX_DEPTH_FLAG = "rlm-runtime-max-depth";
 const DEFAULT_MAX_DEPTH = 4;
+const DEFAULT_IPYTHON_TIMEOUT_SECONDS = 20;
 const UPDATE_INTERVAL_MS = 100;
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeDir = join(packageRoot, "python");
@@ -24,6 +25,11 @@ const ipythonParameters = Type.Object({
         maxLength: 262_144,
         description: "Python scratchpad code or `%%bash` shell cells to execute in the agent kernel. A cell whose first line is `%%kernel` lists the available kernel environments, and `%%kernel pixi` / `%%kernel uv` / `%%kernel python /abs/path` restarts the kernel in that environment. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
     }),
+    timeout_seconds: Type.Optional(Type.Integer({
+        minimum: 1,
+        maximum: 3600,
+        description: "Seconds this cell may run before it is interrupted (default 20). Raise it only for a specific slow step; use bg(...) for genuinely long-running work.",
+    })),
 }, { additionalProperties: false });
 function createPiRlmRuntimeExtension(subagent, registerStop) {
     return {
@@ -56,6 +62,7 @@ function bindExtension(pi, subagent, registerStop) {
     let subagentsExpanded = false;
     let selectedSubagent;
     let unsubscribeSelectionInput;
+    let activityRefreshTimer;
     const enabled = () => subagent !== undefined || (pi.getFlag(RUNTIME_FLAG) === true && pi.getFlag(NO_RUNTIME_FLAG) !== true);
     const stopRuntime = async () => {
         const current = runtime;
@@ -63,10 +70,34 @@ function bindExtension(pi, subagent, registerStop) {
         await current?.dispose();
     };
     const activeRows = (live) => subagentTreeView(live?.listActiveSubagents() ?? [], Number.MAX_SAFE_INTEGER).rows;
+    const stopActivityRefresh = () => {
+        if (!activityRefreshTimer)
+            return;
+        clearInterval(activityRefreshTimer);
+        activityRefreshTimer = undefined;
+    };
+    const syncActivityRefresh = (ctx, live) => {
+        if (subagent || !ctx.hasUI || ctx.mode !== "tui" || !live?.listActiveSubagents().some((item) => item.status === "running")) {
+            stopActivityRefresh();
+            return;
+        }
+        if (activityRefreshTimer)
+            return;
+        activityRefreshTimer = setInterval(() => {
+            if (!runtime || !uiContext || !runtime.listActiveSubagents().some((item) => item.status === "running")) {
+                stopActivityRefresh();
+                return;
+            }
+            if (subagentsExpanded)
+                redrawSubagents(uiContext, runtime, true);
+        }, 1000);
+        activityRefreshTimer.unref?.();
+    };
     const redrawSubagents = (ctx, live, expanded = subagentsExpanded) => {
         if (selectedSubagent && !activeRows(live).some(({ subagent: item }) => item.name === selectedSubagent))
             selectedSubagent = undefined;
         showSubagents(ctx, live, expanded, selectedSubagent);
+        syncActivityRefresh(ctx, live);
     };
     const clearSelection = (ctx) => {
         if (!selectedSubagent)
@@ -105,6 +136,7 @@ function bindExtension(pi, subagent, registerStop) {
         unsubscribeSelectionInput?.();
         unsubscribeSelectionInput = undefined;
         selectedSubagent = undefined;
+        stopActivityRefresh();
         await stopRuntime();
     });
     const runtimeFor = (ctx) => {
@@ -203,12 +235,12 @@ function bindExtension(pi, subagent, registerStop) {
         pi.registerTool({
             name: IPYTHON_TOOL,
             label: "ipython",
-            description: "Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls. Start a cell with `%%kernel` to list or switch the kernel's Python environment (for example `%%kernel pixi` for the project's local pixi environment). The preloaded `bg(...)` wrapper starts our own tracked long-running shell tasks from Python. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
-            promptSnippet: "ipython - persistent agent notebook for Python, %%bash, and tracked bg(...) tasks",
+            description: "Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls. Start a cell with `%%kernel` to list or switch the kernel's Python environment (for example `%%kernel pixi` for the project's local pixi environment). The preloaded `bg(...)` wrapper starts our own tracked long-running shell tasks from Python. Preloaded `rg_files(...)` and `rg_search(...)` helpers are the expected way to find files and code. Cells are interrupted after 20 seconds by default; pass timeout_seconds explicitly for a specific slow step, or use bg(...) for genuinely long-running work. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
+            promptSnippet: "ipython - persistent agent notebook for Python, %%bash, tracked bg(...) tasks, and bounded rg search (20s default timeout)",
             parameters: ipythonParameters,
             executionMode: "sequential",
             ...createIpythonRenderers(),
-            async execute(_toolCallId, { code }, signal, onUpdate, ctx) {
+            async execute(_toolCallId, { code, timeout_seconds }, signal, onUpdate, ctx) {
                 const live = runtimeFor(ctx);
                 const startedAt = Date.now();
                 let timer;
@@ -248,7 +280,7 @@ function bindExtension(pi, subagent, registerStop) {
                     };
                 }
                 try {
-                    const result = await live.execute(code, signal, update);
+                    const result = await live.execute(code, signal, update, (timeout_seconds ?? DEFAULT_IPYTHON_TIMEOUT_SECONDS) * 1000);
                     if (result.status === "error")
                         throw kernelError(code, result);
                     return {
@@ -316,6 +348,7 @@ function bindExtension(pi, subagent, registerStop) {
         unsubscribeSelectionInput?.();
         unsubscribeSelectionInput = undefined;
         selectedSubagent = undefined;
+        stopActivityRefresh();
         await stopRuntime();
         showSubagents(ctx, undefined, subagentsExpanded);
     });
