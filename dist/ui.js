@@ -2,6 +2,19 @@ import { Key, matchesKey, ScrollView, Text, VStack } from "@earendil-works/pi-tu
 
 const SUBAGENTS_WIDGET = "pi-rlm-runtime-subagents";
 const MAX_VISIBLE_SUBAGENTS = 12;
+const MAX_PREVIEW_LINES = 2;
+const MAX_NAME_PREVIEW_CHARS = 48;
+const MAX_ACTIVITY_PREVIEW_CHARS = 48;
+const MAX_DETAIL_PREVIEW_CHARS = 120;
+const MAX_DETAIL_FIELD_CHARS = 80;
+function previewText(value, maxChars) {
+    const text = String(value ?? "")
+        .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+        .replace(/[\u0000-\u001f\u007f]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
+}
 class PreservingScrollView extends ScrollView {
     updateLayout(contentHeight, viewportHeight, requestRender) {
         const preserveManualPosition = !this.isFollowingEnd;
@@ -199,12 +212,17 @@ function formatSubagent(ctx, prefix, subagent, selected = false) {
     const state = isTask
         ? ctx.ui.theme.fg(subagent.taskStatus === "failed" ? "error" : subagent.taskStatus === "completed" ? "success" : "muted", `◆ ${subagent.taskStatus ?? subagent.status}`)
         : subagent.status === "running" ? ctx.ui.theme.fg("success", "● running") : ctx.ui.theme.fg("muted", "idle");
-    const detail = [subagent.command, subagent.output && `↳ ${subagent.output}`].filter(Boolean).join(" · ");
+    const name = previewText(subagent.name, MAX_NAME_PREVIEW_CHARS);
+    const activity = previewText(subagent.activity, MAX_ACTIVITY_PREVIEW_CHARS);
+    const detail = previewText([
+        previewText(subagent.command, MAX_DETAIL_FIELD_CHARS),
+        subagent.output && `↳ ${previewText(subagent.output, MAX_DETAIL_FIELD_CHARS)}`,
+    ].filter(Boolean).join(" · "), MAX_DETAIL_PREVIEW_CHARS);
     const marker = selected ? ctx.ui.theme.fg("accent", "▶ ") : "  ";
-    const lines = [`${marker}${ctx.ui.theme.fg("dim", prefix)}${ctx.ui.theme.fg("text", subagent.name)} ${ctx.ui.theme.fg("dim", "·")} ${state}${subagent.activity ? ` ${ctx.ui.theme.fg("dim", `(${subagent.activity})`)}` : ""}`];
+    const lines = [`${marker}${ctx.ui.theme.fg("dim", prefix)}${ctx.ui.theme.fg("text", name)} ${ctx.ui.theme.fg("dim", "·")} ${state}${activity ? ` ${ctx.ui.theme.fg("dim", `(${activity})`)}` : ""}`];
     if (detail) {
         const continuation = prefix.replace(/[├└]─ /, "   ");
         lines.push(`  ${ctx.ui.theme.fg("dim", continuation)}${ctx.ui.theme.fg("muted", detail)}`);
     }
-    return lines;
+    return lines.slice(0, MAX_PREVIEW_LINES);
 }

@@ -150,6 +150,33 @@ test("background tasks are marked distinctly in the sub-agent tree", () => {
 	assert.match(widget.join("\n"), /\$ printf done/);
 });
 
+test("sub-agent previews stay within two single-line rows", () => {
+	let widget: string[] = [];
+	const ctx = {
+		hasUI: true,
+		ui: {
+			theme: { fg: (_color, text) => text },
+			setWidget: (_id, value) => { widget = value; },
+		},
+	};
+	showSubagents(ctx, {
+		listActiveSubagents: () => [{
+			name: `worker-${"name ".repeat(100)}`,
+			status: "running",
+			command: "$ line1\nline2\nline3",
+			output: `first line\n${"output ".repeat(400)}`,
+			activity: `running ${"activity ".repeat(100)}`,
+			subagents: [],
+		}],
+	}, true);
+
+	assert.equal(widget.length, 3);
+	assert.ok(widget.slice(1).length <= 2);
+	assert.ok(widget.every((line) => !line.includes("\n")));
+	assert.ok(widget.slice(1).every((line) => line.length <= 180));
+	assert.match(widget[2], /\$ line1 line2 line3/);
+});
+
 test("Shift+Up/Down selects a sub-agent and Enter opens its transcript", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-selection-"));
 	const active = [
