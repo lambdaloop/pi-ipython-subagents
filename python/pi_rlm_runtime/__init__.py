@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -62,14 +63,32 @@ class BackgroundLogs:
     tail: bool
 
 
-@dataclass(frozen=True, slots=True)
-class FileList:
-    paths: tuple[str, ...]
-    truncated: bool
-    command: str
+class FileList(list[str]):
+    """A rendered file listing that also behaves like a normal list.
+
+    The list contents are the individual paths returned by ripgrep.  The
+    metadata remains available for callers that need to inspect truncation or
+    the command that was run, while iteration, indexing, slicing, and sorting
+    use the ordinary list protocols.
+    """
+
+    def __init__(
+        self,
+        paths: Iterable[str] = (),
+        truncated: bool = False,
+        command: str = "",
+    ) -> None:
+        super().__init__(paths)
+        self.truncated = truncated
+        self.command = command
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        """Return the paths as an immutable snapshot for API compatibility."""
+        return tuple(self)
 
     def __str__(self) -> str:
-        lines = list(self.paths)
+        lines = list(self)
         if self.truncated:
             lines.append("… output truncated; narrow with path= or glob=")
         return "\n".join(lines) or "(no files found)"
@@ -77,17 +96,33 @@ class FileList:
     __repr__ = __str__
 
 
-@dataclass(frozen=True, slots=True)
-class SearchResult:
-    matches: tuple[str, ...]
-    truncated: bool
-    command: str
+class SearchResult(str):
+    """A rendered search result that also behaves like a normal string."""
+
+    def __new__(
+        cls,
+        matches: Iterable[str] | str = (),
+        truncated: bool = False,
+        command: str = "",
+    ) -> "SearchResult":
+        # Accepting a string is useful when constructing a result directly;
+        # rg_search itself passes individual output lines as an iterable.
+        if isinstance(matches, str):
+            match_lines = tuple(matches.splitlines())
+        else:
+            match_lines = tuple(matches)
+        rendered = "\n".join(match_lines)
+        if truncated:
+            rendered = f"{rendered}\n… output truncated; narrow with path= or glob="
+
+        result = super().__new__(cls, rendered)
+        result.matches = match_lines
+        result.truncated = truncated
+        result.command = command
+        return result
 
     def __str__(self) -> str:
-        lines = list(self.matches)
-        if self.truncated:
-            lines.append("… output truncated; narrow with path= or glob=")
-        return "\n".join(lines) or "(no matches)"
+        return str.__str__(self) or "(no matches)"
 
     __repr__ = __str__
 
