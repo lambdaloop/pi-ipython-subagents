@@ -25,7 +25,7 @@ Review this codebase. Use sub-agents to inspect the architecture, runtime,
 and tests in parallel, then reconcile their findings.
 ```
 
-The runtime gives the main agent a persistent working environment and the ability to create, message, inspect, and stop sub-agents. The main agent keeps all native Pi tools alongside `ipython`; RLM sub-agents receive only `ipython` directly and use it for file work, shell commands, and project tools. Each sub-agent has its own Pi conversation and state, shares the project directory, and inherits the parent model unless another is selected.
+The runtime gives the main agent a persistent working environment and the ability to create, message, inspect, and stop sub-agents. The main agent keeps native Pi tools except the shell tools (`bash` and `powershell`) alongside `ipython`; use IPython for shell commands, file work, and project tools. RLM sub-agents receive only `ipython` directly. Each sub-agent has its own Pi conversation and state, shares the project directory, and inherits the parent model unless another is selected.
 
 Sub-agents may create further sub-agents. Set the recursion limit when starting Pi:
 
@@ -125,16 +125,20 @@ the first line of a cell:
 ```text
 %%kernel                 # list the available environments
 %%kernel pixi            # restart inside the project's local pixi environment
+%%kernel pixi -e dev     # select the Pixi 'dev' environment
 %%kernel uv              # back to the isolated uv default
 %%kernel python /abs/path/to/python
+
+# Code after the directive executes in the selected environment:
+%%kernel pixi -e dev
+import project_package
 ```
 
 `pixi` is offered automatically when the working directory is inside a pixi project with a
 materialised `.pixi/envs/<name>` directory, so cells can import the project's dependencies directly.
 When that environment does not ship `ipykernel`, the runtime supplies one from a cached uv
 environment built for the same Python version, and reports that under `%%kernel`. If automatic Pixi
-startup fails, the `%%kernel` listing explains the fallback to uv. A switch replaces the kernel, so
-kernel state is discarded, and sub-agents share the same environment choice.
+startup fails, the `%%kernel` listing explains the fallback to uv. A switch replaces the kernel, so kernel state is discarded, and sub-agents share the same environment choice. Code after the first-line directive runs after the switch in the selected environment.
 
 The environment is verified before it is adopted; an environment that cannot import `ipykernel`
 leaves the previous one active.

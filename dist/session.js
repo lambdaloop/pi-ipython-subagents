@@ -6,6 +6,7 @@ import { BackgroundTasks } from "./background.js";
 import { loadSubagents, SUBAGENT_ENTRY, subagentCreated, subagentDeleted } from "./state.js";
 import { startSubagent, } from "./subagent.js";
 const AGENT_MESSAGE_TYPE = "pi-rlm-runtime.message";
+export const RLM_USAGE_ENTRY = "pi-rlm-runtime.usage";
 const OUT_OF_REACH = "can only message parent, siblings, and direct subagents";
 const MAX_NAME = 64;
 const MAX_MESSAGE = 16_384;
@@ -153,7 +154,7 @@ export class SessionRuntime {
         this.open();
         const directive = parseKernelDirective(code);
         if (directive !== undefined)
-            return this.runKernelDirective(directive);
+            return this.runKernelDirective(directive.args, directive.body, signal, onUpdate, timeoutMs);
         this.kernel ??= new SessionKernel(this.kernels);
         return this.kernel.execute(code, this, signal, onUpdate, timeoutMs);
     }
@@ -161,7 +162,7 @@ export class SessionRuntime {
      * Host-side handling for the `%%kernel` directive: the kernel cannot restart
      * itself, so the runtime swaps the environment and recreates the kernel.
      */
-    async runKernelDirective(args) {
+    async runKernelDirective(args, body, signal, onUpdate, timeoutMs) {
         const startedAt = Date.now();
         const result = (stdout) => ({
             status: "ok",
@@ -184,18 +185,49 @@ export class SessionRuntime {
             attachments: [],
             error: { ename: "KernelDirective", evalue: message, traceback: [message] },
         });
+        const executeBody = async (message) => {
+            if (!body.trim())
+                return result(message);
+            this.kernel ??= new SessionKernel(this.kernels);
+            try {
+                const execution = await this.kernel.execute(body, this, signal, onUpdate, timeoutMs);
+                return {
+                    ...execution,
+                    durationMs: Date.now() - startedAt,
+                    stdout: [message, execution.stdout].filter(Boolean).join("\n"),
+                };
+            }
+            catch (error) {
+                return failure(`${message}\n\nThe cell body failed: ${errorMessage(error)}`);
+            }
+        };
         const kernels = this.kernels;
         if (!Array.isArray(kernels?.environments) || !kernels.environments.length)
             return failure("IPython kernel environments are unavailable in this session");
         const tokens = args.split(/\s+/).filter(Boolean);
-        if (!tokens.length) {
-            const lines = ["IPython kernel environments (use `%%kernel <name>` to restart into one):"];
+        const selector = tokens[0];
+        if (!selector) {
+            const lines = ["IPython kernel environments (use `%%kernel <name>` or `%%kernel pixi -e <environment>` to restart into one):"];
             for (const environment of kernels.environments)
                 lines.push(...kernels.describe(environment));
-            return result(lines.join("\n"));
+            return executeBody(lines.join("\n"));
         }
-        let spec = kernels.find(tokens[0]);
-        if (tokens[0] === "python") {
+        let spec = kernels.find(selector);
+        const environmentFlag = tokens.findIndex((token, index) => index > 0 && (token === "-e" || token === "--environment"));
+        if (selector === "pixi" && environmentFlag >= 0) {
+            const environment = tokens[environmentFlag + 1];
+            if (!environment)
+                return failure("`%%kernel pixi -e <environment>` needs an environment name");
+            const pixi = kernels.find("pixi");
+            if (!pixi)
+                return failure("Pixi kernel environment is unavailable in this session");
+            spec = selectPixiEnvironment(pixi, environment);
+            if (!spec)
+                return failure("The Pixi kernel does not expose a project manifest path");
+            if (!existsSync(spec.python))
+                return failure(`Pixi environment '${environment}' is not materialized at ${spec.python}. Run \`pixi install -e ${environment}\` first.`);
+        }
+        if (selector === "python") {
             const path = tokens[1];
             if (!path)
                 return failure("`%%kernel python <absolute path>` needs an interpreter path");
@@ -222,7 +254,7 @@ export class SessionRuntime {
             }
         }
         if (!spec)
-            return failure(`Unknown kernel environment '${tokens[0]}'. Available: ${kernels.names().join(", ")}`);
+            return failure(`Unknown kernel environment '${selector}'. Available: ${kernels.names().join(", ")}`);
         const previous = kernels.activeSpec;
         try {
             kernels.apply(spec);
@@ -245,7 +277,8 @@ export class SessionRuntime {
         const hadKernel = this.kernel !== undefined;
         await this.kernel?.dispose().catch(() => undefined);
         this.kernel = undefined;
-        return result(`${hadKernel ? "Restarted" : "Set"} the IPython kernel to environment '${spec.name}' (${spec.detail}).\nThe next cell runs there; Python state from the previous kernel is gone.`);
+        const selectedEnvironment = spec.kind === "pixi" && spec.environment ? `${spec.name} -e ${spec.environment}` : spec.name;
+        return executeBody(`${hadKernel ? "Restarted" : "Set"} the IPython kernel to environment '${selectedEnvironment}' (${spec.detail}).\nThe next cell runs there; Python state from the previous kernel is gone.`);
     }
     async request(value, signal) {
         this.open();
@@ -465,7 +498,18 @@ export class SessionRuntime {
             send: (message, from, to) => this.fromSubagent(message, from, to),
             list: (forSubagent) => this.listFor(forSubagent),
             updateSubagents: (from, subagents) => this.updateSubagents(from, subagents),
+            recordUsage: (usage, details) => this.recordExternalUsage(usage, details),
         };
+    }
+    recordExternalUsage(usage, details = {}) {
+        this.open();
+        this.options.pi.appendEntry(RLM_USAGE_ENTRY, {
+            usage,
+            ...details,
+        });
+        // Forward once per parent boundary. Every session stores its own copy,
+        // while the root session receives exactly one copy per provider call.
+        this.options.parent?.recordUsage(usage, details);
     }
     updateSubagents(from, subagents) {
         if (this.closed)
@@ -872,10 +916,30 @@ function text(value, label, max) {
     return parsed;
 }
 const KERNEL_DIRECTIVE = /^(?:#\s*)?%%kernel(?:\s+(.*))?$/;
+function selectPixiEnvironment(spec, environment) {
+    const args = [...spec.commandArgs];
+    const environmentIndex = args.findIndex((argument) => argument === "--environment");
+    const manifestIndex = args.findIndex((argument) => argument === "--manifest-path");
+    const projectRoot = spec.projectRoot ?? (manifestIndex >= 0 ? args[manifestIndex + 1] : undefined);
+    if (environmentIndex < 0 || manifestIndex < 0 || !projectRoot)
+        return undefined;
+    args[environmentIndex + 1] = environment;
+    const python = join(projectRoot, ".pixi", "envs", environment, "bin", "python");
+    return {
+        ...spec,
+        label: `project environment ${environment}`,
+        detail: python,
+        commandArgs: args,
+        projectRoot,
+        environment,
+        python,
+    };
+}
 function parseKernelDirective(code) {
-    const firstLine = String(code).split("\n", 1)[0].trim();
+    const lines = String(code).split("\n");
+    const firstLine = lines.shift().trim();
     const match = firstLine.match(KERNEL_DIRECTIVE);
-    return match ? (match[1] ?? "").trim() : undefined;
+    return match ? { args: (match[1] ?? "").trim(), body: lines.join("\n") } : undefined;
 }
 function abortErr() {
     const e = new Error("Operation aborted");

@@ -5,12 +5,13 @@ import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { buildPiRlmRuntimePrompt } from "./prompt.js";
 import { createIpythonRenderers } from "./render.js";
-import { SessionRuntime } from "./session.js";
+import { RLM_USAGE_ENTRY, SessionRuntime } from "./session.js";
 import { loadRecursion, MAX_DEPTH } from "./state.js";
 import { SUBAGENT_EXTENSION_NAME } from "./subagent.js";
 import { browseSubagent, showSubagents, subagentTreeView } from "./ui.js";
 
 const IPYTHON_TOOL = "ipython";
+const DISABLED_MAIN_TOOLS = new Set(["bash", "powershell"]);
 const RUNTIME_FLAG = "rlm-runtime";
 const NO_RUNTIME_FLAG = "no-rlm-runtime";
 const MAX_DEPTH_FLAG = "rlm-runtime-max-depth";
@@ -19,6 +20,63 @@ const DEFAULT_IPYTHON_TIMEOUT_SECONDS = 20;
 const UPDATE_INTERVAL_MS = 100;
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtimeDir = join(packageRoot, "python");
+const USAGE_PATCH_MARK = Symbol.for("pi-rlm-runtime.usage-patch");
+function externalUsage(entry) {
+    return entry?.type === "custom" && entry.customType === RLM_USAGE_ENTRY ? entry.data?.usage : undefined;
+}
+function usageTotals(entries) {
+    const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    for (const entry of entries) {
+        const usage = externalUsage(entry);
+        if (!usage)
+            continue;
+        totals.input += Number(usage.input) || 0;
+        totals.output += Number(usage.output) || 0;
+        totals.cacheRead += Number(usage.cacheRead) || 0;
+        totals.cacheWrite += Number(usage.cacheWrite) || 0;
+        totals.cost += Number(usage.cost?.total) || 0;
+    }
+    return totals;
+}
+function isUsageConsumer() {
+    const stack = new Error().stack ?? "";
+    return (stack.includes("FooterComponent.render") ||
+        stack.includes("AgentSession.getSessionStats") ||
+        stack.includes("InteractiveMode.handleSessionCommand") ||
+        stack.includes("getUsageCostBreakdown"));
+}
+function installUsageAccountingPatch(sessionManager) {
+    const prototype = sessionManager?.constructor?.prototype;
+    if (!prototype || prototype[USAGE_PATCH_MARK])
+        return;
+    prototype[USAGE_PATCH_MARK] = true;
+    const originalGetEntries = prototype.getEntries;
+    prototype.getEntries = function (...args) {
+        const entries = originalGetEntries.apply(this, args);
+        if (!isUsageConsumer())
+            return entries;
+        const extra = usageTotals(entries);
+        if (!extra.input && !extra.output && !extra.cacheRead && !extra.cacheWrite && !extra.cost)
+            return entries;
+        // Both the footer and getSessionStats already understand compaction
+        // usage. This ephemeral entry is never persisted and never enters LLM
+        // context; it only bridges extension telemetry into Pi's built-in views.
+        return [...entries, { type: "compaction", usage: {
+                    input: extra.input,
+                    output: extra.output,
+                    cacheRead: extra.cacheRead,
+                    cacheWrite: extra.cacheWrite,
+                    totalTokens: extra.input + extra.output + extra.cacheRead + extra.cacheWrite,
+                    cost: {
+                        input: 0,
+                        output: 0,
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        total: extra.cost,
+                    },
+                } }];
+    };
+}
 const ipythonParameters = Type.Object({
     code: Type.String({
         minLength: 1,
@@ -132,6 +190,20 @@ function bindExtension(pi, subagent, registerStop) {
             }
         });
     };
+    // Subagents have independent sessions, so forward each completed assistant
+    // response's provider usage to the parent session. The parent stores it as
+    // a context-excluded usage entry and forwards it upward for nested RLM.
+    if (subagent) {
+        pi.on("message_end", (event) => {
+            const message = event.message;
+            if (message.role !== "assistant" || !message.usage)
+                return;
+            subagent.parent.recordUsage(message.usage, {
+                sourceTimestamp: message.timestamp,
+                model: message.provider + "/" + (message.responseModel ?? message.model),
+            });
+        });
+    }
     registerStop?.(async () => {
         unsubscribeSelectionInput?.();
         unsubscribeSelectionInput = undefined;
@@ -140,6 +212,7 @@ function bindExtension(pi, subagent, registerStop) {
         await stopRuntime();
     });
     const runtimeFor = (ctx) => {
+        installUsageAccountingPatch(ctx.sessionManager);
         uiContext = ctx;
         if (runtime) {
             runtime.updateContext(ctx);
@@ -354,8 +427,8 @@ function bindExtension(pi, subagent, registerStop) {
     });
 }
 /**
- * Tool policy. A sub-agent works through IPython alone; the main session keeps
- * every active tool and gains IPython alongside them.
+ * Tool policy. Sub-agents work through IPython alone; the main session keeps
+ * native tools except for shell tools, and gains IPython alongside them.
  */
 export function syncActiveTools(pi, subagent) {
     const tools = pi.getActiveTools();
@@ -364,8 +437,11 @@ export function syncActiveTools(pi, subagent) {
             pi.setActiveTools([IPYTHON_TOOL]);
         return;
     }
-    if (!tools.includes(IPYTHON_TOOL))
-        pi.setActiveTools([...tools, IPYTHON_TOOL]);
+    const filtered = tools.filter((name) => !DISABLED_MAIN_TOOLS.has(name));
+    if (!filtered.includes(IPYTHON_TOOL))
+        filtered.push(IPYTHON_TOOL);
+    if (filtered.length !== tools.length || filtered.some((name, index) => name !== tools[index]))
+        pi.setActiveTools(filtered);
 }
 function configuredMaxDepth(pi) {
     const value = Number(pi.getFlag(MAX_DEPTH_FLAG) ?? DEFAULT_MAX_DEPTH);

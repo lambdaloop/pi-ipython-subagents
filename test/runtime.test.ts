@@ -6,7 +6,7 @@ import test from "node:test";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { BackgroundTasks } from "../dist/background.js";
 import piRlmRuntime, { syncActiveTools } from "../dist/index.js";
-import { BOOTSTRAP, createKernelRuntime } from "../dist/kernel.js";
+import { BOOTSTRAP, createKernelRuntime, SessionKernel } from "../dist/kernel.js";
 import { buildPiRlmRuntimePrompt } from "../dist/prompt.js";
 import { createIpythonRenderers } from "../dist/render.js";
 import { SessionRuntime } from "../dist/session.js";
@@ -50,14 +50,15 @@ function mockPi() {
 	return { pi, events, flags, tools, shortcuts, get active() { return active; } };
 }
 
-test("RLM is enabled by default and preserves native tools", async () => {
+test("RLM is enabled by default and routes shell work through IPython", async () => {
 	const mock = mockPi();
 	piRlmRuntime(mock.pi);
 	await mock.events.get("turn_start")();
 	assert.equal(mock.flags.get("rlm-runtime"), true);
-	assert.deepEqual(mock.active, ["read", "bash", "edit", "write", "ipython"]);
+	assert.deepEqual(mock.active, ["read", "edit", "write", "ipython"]);
+	mock.active.splice(0, mock.active.length, "read", "bash", "powershell", "edit", "write", "ipython");
 	await mock.events.get("turn_start")();
-	assert.equal(mock.active.filter((name) => name === "ipython").length, 1);
+	assert.deepEqual(mock.active, ["read", "edit", "write", "ipython"]);
 
 	mock.flags.set("no-rlm-runtime", true);
 	mock.active.splice(0, mock.active.length, "read", "bash");
@@ -81,7 +82,7 @@ test("sub-agent policy leaves only ipython and the prompt distinguishes session 
 		maxDepth: 4,
 		parentName: "main",
 	});
-	assert.match(mainPrompt, /other native Pi tools stay enabled/);
+	assert.match(mainPrompt, /native Pi tools stay enabled except the native shell tools \(`bash` and `powershell`\)/);
 	assert.match(subPrompt, /only direct tool/);
 	assert.match(mainPrompt, /rg_files\(\.\.\.\)/);
 	assert.match(mainPrompt, /rg_search\(\.\.\.\)/);
@@ -605,10 +606,11 @@ test("an explicit interpreter overrides the automatic pixi default", () => {
 	}
 });
 
-function stubKernels() {
+function stubKernels(projectRoot = "/tmp") {
 	const environments = [
 		{ name: "uv", label: "isolated uv environment", detail: "uv run", kind: "uv", command: "uv", commandArgs: [], cwd: "/tmp" },
 		{ name: "second", label: "second uv environment", detail: "uv run again", kind: "uv", command: "uv", commandArgs: [], cwd: "/tmp" },
+		{ name: "pixi", label: "project environment default", detail: join(projectRoot, ".pixi", "envs", "default", "bin", "python"), kind: "pixi", command: "true", commandArgs: ["run", "--manifest-path", projectRoot, "--environment", "default", "python"], cwd: projectRoot, projectRoot, environment: "default", python: join(projectRoot, ".pixi", "envs", "default", "bin", "python") },
 	];
 	const kernels = {
 		environments,
@@ -648,7 +650,10 @@ function runtimeWith(kernels) {
 }
 
 test("the %%kernel directive lists environments, switches, and rejects unknown names", async () => {
-	const runtime = runtimeWith(stubKernels());
+	const pixiProject = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-directive-pixi-"));
+	mkdirSync(join(pixiProject, ".pixi", "envs", "dev", "bin"), { recursive: true });
+	writeFileSync(join(pixiProject, ".pixi", "envs", "dev", "bin", "python"), "");
+	const runtime = runtimeWith(stubKernels(pixiProject));
 	try {
 		const listed = await runtime.execute("%%kernel", undefined, undefined);
 		assert.equal(listed.status, "ok");
@@ -660,10 +665,42 @@ test("the %%kernel directive lists environments, switches, and rejects unknown n
 		assert.match(switched.stdout, /environment 'second'/);
 		assert.equal(runtime.kernels.active, "second");
 
+		const selected = await runtime.execute("%%kernel pixi -e dev", undefined, undefined);
+		assert.equal(selected.status, "ok");
+		assert.match(selected.stdout, /environment 'pixi -e dev'/);
+		assert.equal(runtime.kernels.active, "pixi");
+		assert.equal(runtime.kernels.activeSpec.commandArgs.at(-2), "dev");
+
+		let executedCode;
+		const originalExecute = SessionKernel.prototype.execute;
+		SessionKernel.prototype.execute = async function (code) {
+			executedCode = code;
+			return {
+				status: "ok",
+				durationMs: 1,
+				executionCount: 1,
+				stdout: "hello from pixi",
+				stderr: "",
+				result: "",
+				display: "",
+				attachments: [],
+			};
+		};
+		try {
+			const withBody = await runtime.execute("%%kernel pixi -e dev\nprint('hello')", undefined, undefined);
+			assert.equal(withBody.status, "ok");
+			assert.equal(executedCode, "print('hello')");
+			assert.match(withBody.stdout, /environment 'pixi -e dev'/);
+			assert.match(withBody.stdout, /hello from pixi/);
+		}
+		finally {
+			SessionKernel.prototype.execute = originalExecute;
+		}
+
 		const unknown = await runtime.execute("%%kernel missing", undefined, undefined);
 		assert.equal(unknown.status, "error");
 		assert.match(unknown.error.evalue, /Unknown kernel environment 'missing'/);
-		assert.equal(runtime.kernels.active, "second");
+		assert.equal(runtime.kernels.active, "pixi");
 
 		const needsPath = await runtime.execute("%%kernel python relative/path", undefined, undefined);
 		assert.equal(needsPath.status, "error");
@@ -675,6 +712,7 @@ test("the %%kernel directive lists environments, switches, and rejects unknown n
 	}
 	finally {
 		await runtime.dispose();
+		rmSync(pixiProject, { recursive: true, force: true });
 	}
 });
 

@@ -277,6 +277,8 @@ function discoverKernelEnvironments(cwd) {
             command: "pixi",
             commandArgs: ["run", "--manifest-path", pixi.root, "--environment", pixi.environment, "python"],
             cwd: pixi.root,
+            projectRoot: pixi.root,
+            environment: pixi.environment,
             python: pixi.python,
         });
     }
