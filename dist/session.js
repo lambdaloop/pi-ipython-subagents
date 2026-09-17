@@ -55,6 +55,11 @@ export class SessionRuntime {
     listSubagents() {
         return sortedSubagents(this.subagents.values()).map(subagentInfo);
     }
+    listRunningSubagents() {
+        return sortedSubagents(this.subagents.values())
+            .filter((subagent) => status(subagent) === "running")
+            .map(runningSubagentInfo);
+    }
     listInspectable() {
         return [
             ...this.listSubagents(),
@@ -96,7 +101,9 @@ export class SessionRuntime {
                 output: subagent.output,
                 activity: subagent.toolName && subagent.toolStartedAt
                     ? `running ${subagent.toolName} ${formatDuration(Date.now() - subagent.toolStartedAt)}`
-                    : subagent.activity,
+                    : subagent.thinkingStartedAt
+                        ? `thinking ${formatDuration(Date.now() - subagent.thinkingStartedAt)}`
+                        : subagent.activity,
                 subagents: subagent.subagents ?? [],
             });
         }
@@ -341,9 +348,12 @@ export class SessionRuntime {
             }
             case "rlm.list_subagents":
                 return this.listSubagents();
+            case "rlm.list_running":
+                return this.listRunningSubagents();
             case "rlm.delete_subagent":
                 return this.drop(text(req.target, "subagent", MAX_NAME));
             case "agent_message.send":
+            case "agent_message.force_send":
                 return this.send(req);
             case "agent_message.list_agents":
                 return this.listAgents();
@@ -462,9 +472,12 @@ export class SessionRuntime {
     async send(req) {
         const message = text(req.message, "message", MAX_MESSAGE);
         const role = roleOf(req.receiver_role);
+        const force = req.type === "agent_message.force_send";
         if (role === "parent") {
             if (req.receiver_name != null)
                 throw new Error("receiver_name must be omitted for parent messages");
+            if (force)
+                throw new Error("force_send cannot target the parent");
             if (!this.options.parent)
                 throw new Error("This session has no parent");
             return this.options.parent.send(message, this.me(), "parent");
@@ -472,9 +485,9 @@ export class SessionRuntime {
         if (role === "sibling") {
             if (!this.options.parent)
                 throw new Error(OUT_OF_REACH);
-            return this.options.parent.send(message, this.me(), { sibling: agentName(req.receiver_name) });
+            return this.options.parent.send(message, this.me(), { sibling: agentName(req.receiver_name), force });
         }
-        return this.toSubagent(this.require(agentName(req.receiver_name)), message, this.me(), "parent");
+        return this.toSubagent(this.require(agentName(req.receiver_name)), message, this.me(), "parent", force);
     }
     listAgents() {
         const me = this.me();
@@ -534,7 +547,7 @@ export class SessionRuntime {
         const sibling = this.require(to.sibling);
         if (sibling.sessionId === from.id)
             throw new Error("Cannot message yourself");
-        await this.toSubagent(sibling, message, from, "sibling");
+        await this.toSubagent(sibling, message, from, "sibling", to.force === true);
         if (subagent.run?.replyTo === sibling.sessionId)
             subagent.run.replied = true;
     }
@@ -563,7 +576,7 @@ export class SessionRuntime {
         }
         return entries;
     }
-    async toSubagent(subagent, message, from, fromRelationship) {
+    async toSubagent(subagent, message, from, fromRelationship, force = false) {
         const agent = subagent.agent ?? (await this.reopen(subagent));
         if (this.closed || this.subagents.get(subagent.sessionId) !== subagent) {
             await agent.close().catch(() => undefined);
@@ -571,14 +584,27 @@ export class SessionRuntime {
             throw new Error(`Sub-agent ${JSON.stringify(subagent.name)} is no longer available`);
         }
         const queued = agent.session.isStreaming;
-        const label = fromRelationship === "sibling" ? `Message from sibling ${from.name}` : `Message from parent ${from.name}`;
+        if (force) {
+            // A forced message supersedes the current turn and anything it had
+            // queued. Mark the old run as answered so its abort does not emit a
+            // misleading automatic completion message to the parent.
+            if (subagent.run)
+                subagent.run.replied = true;
+            if (queued)
+                await agent.session.abort();
+            agent.session.clearQueue();
+        }
+        const stillStreaming = agent.session.isStreaming;
+        const label = force
+            ? fromRelationship === "sibling" ? `Force-stopped message from sibling ${from.name}` : `Force-stopped message from parent ${from.name}`
+            : fromRelationship === "sibling" ? `Message from sibling ${from.name}` : `Message from parent ${from.name}`;
         const sending = agent.session.sendCustomMessage({
             customType: AGENT_MESSAGE_TYPE,
             content: `${label}:\n\n${message}`,
             display: true,
-            details: { from, fromRelationship, to: { id: subagent.sessionId, name: subagent.name } },
-        }, queued ? { triggerTurn: true, deliverAs: "steer" } : { triggerTurn: true });
-        if (queued)
+            details: { from, fromRelationship, to: { id: subagent.sessionId, name: subagent.name }, force },
+        }, stillStreaming ? { triggerTurn: true, deliverAs: "steer" } : { triggerTurn: true });
+        if (stillStreaming)
             await sending;
         else {
             const run = {
@@ -755,16 +781,20 @@ function updateSubagentActivity(subagent, event) {
     switch (event.type) {
         case "agent_start":
             subagent.activity = "starting";
+            subagent.thinkingStartedAt = Date.now();
             break;
         case "turn_start":
             subagent.activity = "thinking";
+            subagent.thinkingStartedAt = Date.now();
             break;
         case "message_update":
             subagent.activity = "thinking";
+            subagent.thinkingStartedAt ??= Date.now();
             break;
         case "tool_execution_start":
             subagent.toolName = event.toolName;
             subagent.toolStartedAt = Date.now();
+            delete subagent.thinkingStartedAt;
             subagent.activity = `running ${event.toolName}`;
             subagent.command = toolCommand(event.toolName, event.args);
             subagent.output = undefined;
@@ -789,6 +819,7 @@ function updateSubagentActivity(subagent, event) {
         }
         case "agent_settled":
             subagent.activity = "idle";
+            delete subagent.thinkingStartedAt;
             break;
     }
 }
@@ -836,6 +867,21 @@ function subagentInfo(subagent) {
         session_dir: subagent.sessionFile ? dirname(subagent.sessionFile) : null,
         model: subagent.model,
         status: status(subagent),
+    };
+}
+function runningSubagentInfo(subagent) {
+    const tool = subagent.toolName;
+    const startedAt = tool ? subagent.toolStartedAt : subagent.thinkingStartedAt;
+    const elapsedMs = startedAt === undefined ? 0 : Math.max(0, Date.now() - startedAt);
+    const phase = tool ? "tool" : "thinking";
+    return {
+        id: subagent.sessionId,
+        name: subagent.name,
+        model: subagent.model,
+        phase,
+        tool: tool ?? null,
+        elapsed_ms: elapsedMs,
+        activity: tool ? `running ${tool} ${formatDuration(elapsedMs)}` : `thinking ${formatDuration(elapsedMs)}`,
     };
 }
 function status(subagent) {

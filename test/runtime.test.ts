@@ -87,6 +87,8 @@ test("sub-agent policy leaves only ipython and the prompt distinguishes session 
 	assert.match(mainPrompt, /rg_files\(\.\.\.\)/);
 	assert.match(mainPrompt, /rg_search\(\.\.\.\)/);
 	assert.match(mainPrompt, /Never search .* as roots/);
+	assert.match(mainPrompt, /agent_message\.force_send/);
+	assert.match(subPrompt, /agent_message\.force_send/);
 	assert.match(subPrompt, /Never search .* as roots/);
 	assert.match(mainPrompt, /20 seconds by default/);
 	assert.match(subPrompt, /20 seconds by default/);
@@ -654,7 +656,7 @@ function stubKernels(projectRoot = "/tmp") {
 function runtimeWith(kernels) {
 	const ctx = {
 		cwd: "/tmp",
-		sessionManager: { getBranch: () => [], getSessionId: () => "directive-test", getSessionFile: () => undefined },
+		sessionManager: { getBranch: () => [], getSessionId: () => "directive-test", getSessionFile: () => undefined, getSessionName: () => "main" },
 	};
 	return new SessionRuntime({
 		pi: {},
@@ -668,6 +670,80 @@ function runtimeWith(kernels) {
 		makeExtension: () => ({}),
 	});
 }
+
+test("force_send aborts a running sub-agent before delivering its message", async () => {
+	const runtime = runtimeWith(stubKernels());
+	const calls = [];
+	let sendMessage;
+	let streaming = true;
+	const oldRun = { replied: false };
+	const child = {
+		sessionId: "child-id",
+		name: "child",
+		run: oldRun,
+		agent: {
+			session: {
+				get isStreaming() { return streaming; },
+				abort: async () => { calls.push("abort"); streaming = false; },
+				clearQueue: () => calls.push("clear"),
+				sendCustomMessage: async (message, options) => {
+					sendMessage = { message, options };
+					return new Promise(() => {});
+				},
+			},
+		},
+	};
+	runtime.subagents.set(child.sessionId, child);
+	try {
+		await runtime.request({
+			type: "agent_message.force_send",
+			message: "Stop and inspect this now.",
+			receiver_role: "subagent",
+			receiver_name: "child",
+		}, new AbortController().signal);
+		assert.deepEqual(calls, ["abort", "clear"]);
+		assert.equal(oldRun.replied, true);
+		assert.equal(sendMessage.options.triggerTurn, true);
+		assert.match(sendMessage.message.content, /Force-stopped message from parent/);
+		assert.equal(sendMessage.message.details.force, true);
+	}
+	finally {
+		await runtime.dispose();
+	}
+});
+
+test("list_running reports tool and thinking activity with elapsed time", () => {
+	const running = SessionRuntime.prototype.listRunningSubagents.call({
+		subagents: new Map([
+			["thinking-id", {
+				sessionId: "thinking-id",
+				name: "thinker",
+				model: "test/model",
+				agent: { session: { isStreaming: true } },
+				thinkingStartedAt: Date.now() - 1200,
+			}],
+			["tool-id", {
+				sessionId: "tool-id",
+				name: "worker",
+				model: "test/model",
+				agent: { session: { isStreaming: true } },
+				toolName: "ipython",
+				toolStartedAt: Date.now() - 2300,
+			}],
+		]),
+	});
+	assert.equal(running.length, 2);
+	const thinker = running.find((item) => item.name === "thinker");
+	assert.equal(thinker.phase, "thinking");
+	assert.equal(thinker.tool, null);
+	assert.ok(thinker.elapsed_ms >= 1200);
+	assert.match(thinker.activity, /^thinking /);
+	const worker = running.find((item) => item.name === "worker");
+	assert.equal(worker.phase, "tool");
+	assert.equal(worker.tool, "ipython");
+	assert.ok(worker.elapsed_ms >= 2300);
+	assert.match(worker.activity, /^running ipython /);
+});
 
 test("the %%kernel directive lists environments, switches, and rejects unknown names", async () => {
 	const pixiProject = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-directive-pixi-"));

@@ -16,6 +16,7 @@ _HOST_TARGET = "pi-rlm-runtime.host"
 
 ReceiverRole = Literal["parent", "sibling", "subagent"]
 AgentStatus = Literal["running", "idle", "dormant"]
+ActivityPhase = Literal["thinking", "tool"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +26,17 @@ class Subagent:
     session_dir: str | None
     model: str
     status: AgentStatus
+
+
+@dataclass(frozen=True, slots=True)
+class RunningSubagent:
+    id: str
+    name: str
+    model: str
+    phase: ActivityPhase
+    tool: str | None
+    elapsed_ms: int
+    activity: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,6 +482,29 @@ class Background:
         )
 
 
+def _running_subagent(result: Any) -> RunningSubagent:
+    if not isinstance(result, dict):
+        raise TypeError("running sub-agent must be an object")
+    phase = result.get("phase")
+    if phase not in ("thinking", "tool"):
+        raise TypeError('phase must be "thinking" or "tool"')
+    elapsed_ms = result.get("elapsed_ms")
+    if not isinstance(elapsed_ms, int) or elapsed_ms < 0:
+        raise TypeError("elapsed_ms must be a non-negative int")
+    tool = result.get("tool")
+    if tool is not None and not isinstance(tool, str):
+        raise TypeError("tool must be a string or None")
+    return RunningSubagent(
+        id=_text(result.get("id"), "id"),
+        name=_text(result.get("name"), "name"),
+        model=_text(result.get("model"), "model"),
+        phase=phase,
+        tool=tool,
+        elapsed_ms=elapsed_ms,
+        activity=_text(result.get("activity"), "activity"),
+    )
+
+
 def _agent_list(result: Any) -> AgentList:
     if not isinstance(result, dict):
         raise TypeError("agent list must be an object")
@@ -534,6 +569,10 @@ class RLM:
     async def list_subagents(self) -> list[Subagent]:
         return [_subagent(subagent) for subagent in await _request("rlm.list_subagents")]
 
+    async def list_running(self) -> list[RunningSubagent]:
+        """Return each running sub-agent's current phase and elapsed time."""
+        return [_running_subagent(subagent) for subagent in await _request("rlm.list_running")]
+
     async def delete_subagent(self, subagent: str | Subagent) -> Subagent:
         target = subagent.id if isinstance(subagent, Subagent) else _text(subagent, "sub-agent")
         return _subagent(await _request("rlm.delete_subagent", target=target))
@@ -552,16 +591,40 @@ class AgentMessage:
         receiver_role: ReceiverRole,
         receiver_name: str | None = None,
     ) -> None:
+        await self._send(message, receiver_role=receiver_role, receiver_name=receiver_name, force=False)
+
+    async def force_send(
+        self,
+        message: str,
+        *,
+        receiver_role: ReceiverRole,
+        receiver_name: str,
+    ) -> None:
+        """Stop a sub-agent's current turn, then deliver this message."""
+        if receiver_role == "parent":
+            raise ValueError("force_send cannot target the parent")
+        await self._send(message, receiver_role=receiver_role, receiver_name=receiver_name, force=True)
+
+    async def _send(
+        self,
+        message: str,
+        *,
+        receiver_role: ReceiverRole,
+        receiver_name: str | None,
+        force: bool,
+    ) -> None:
         if receiver_role not in ("parent", "sibling", "subagent"):
             raise ValueError('receiver_role must be "parent", "sibling", or "subagent"')
         if receiver_role == "parent":
             if receiver_name is not None:
                 raise ValueError("receiver_name must be omitted for parent messages")
+            if force:
+                raise ValueError("force_send cannot target the parent")
         else:
             receiver_name = _text(receiver_name, "receiver_name")
 
         await _request(
-            "agent_message.send",
+            "agent_message.force_send" if force else "agent_message.send",
             message=_text(message, "message"),
             receiver_role=receiver_role,
             receiver_name=receiver_name,
@@ -581,6 +644,7 @@ __all__ = [
     "FileList",
     "RelatedAgent",
     "RLMModel",
+    "RunningSubagent",
     "SearchResult",
     "Subagent",
     "agent_message",

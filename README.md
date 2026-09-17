@@ -67,7 +67,7 @@ await rlm.delete_subagent(reviewer)
 
 For repository discovery, the runtime also preloads bounded ripgrep helpers. Use `rg_files('*.py')` to list files and `rg_search('pattern', 'src', glob='*.py')` to search contents; both are synchronous plain functions.
 
-`agent_message.send()` accepts `parent`, `sibling`, or `subagent` as `receiver_role`. Messages to more distant agents are relayed through the tree.
+`agent_message.send()` accepts `parent`, `sibling`, or `subagent` as `receiver_role`. Messages to more distant agents are relayed through the tree. Use `agent_message.force_send()` for an urgent message to a sibling or sub-agent; it stops the target's current turn, clears queued messages, and then starts the message as a fresh turn.
 
 ## Background tasks
 
