@@ -384,14 +384,24 @@ export class SessionKernel {
             settled: false,
             idle,
             markIdle,
+            replySettled: false,
         };
         this.active = execution;
         this.executionOwners.set(requestMsgId, { host, controller });
         const forceAbort = () => {
-            if (this.active !== execution || execution.settled)
+            // Do not allow a delayed timer from an old execution to reset a
+            // newer cell. If this execution still owns the active slot or its
+            // pending shell reply, however, the kernel did not finish its
+            // interrupted request within the grace period and must be
+            // recreated before another cell can run.
+            const ownsShellReply = execution.reply !== undefined && this.shellReply === execution.reply;
+            if (this.active !== execution && !ownsShellReply)
                 return;
-            execution.settled = true;
-            execution.reject(abortError());
+            if (!execution.settled) {
+                execution.settled = true;
+                execution.reject(abortError());
+            }
+            void this.closeKernel(new Error("IPython kernel reset after interrupted cell")).catch(() => undefined);
         };
         const onAbort = () => {
             controller.abort();
@@ -418,7 +428,19 @@ export class SessionKernel {
             sent = true;
             const reply = receiveExecuteReply(shell, conn.key, requestMsgId);
             this.shellReply = reply;
-            void reply.catch((error) => {
+            execution.reply = reply;
+            void reply.then(() => {
+                execution.replySettled = true;
+                if (abortTimer) {
+                    clearTimeout(abortTimer);
+                    abortTimer = undefined;
+                }
+            }, (error) => {
+                execution.replySettled = true;
+                if (abortTimer) {
+                    clearTimeout(abortTimer);
+                    abortTimer = undefined;
+                }
                 if (this.shell === shell && !this.closePromise) {
                     void this.closeKernel(new Error(`Kernel shell channel failed: ${errorMessage(error)}`));
                 }
@@ -450,7 +472,10 @@ export class SessionKernel {
             throw new Error(`Failed to send execute_request: ${errorMessage(error)}`);
         }
         finally {
-            if (abortTimer)
+            // Keep the abort timer alive while the shell reply is pending.
+            // The interrupt can settle `result` first, and clearing the timer
+            // here would leave a stale execute_request blocking future cells.
+            if (abortTimer && execution.replySettled)
                 clearTimeout(abortTimer);
             if (cellTimer)
                 clearTimeout(cellTimer);
@@ -781,8 +806,18 @@ export class SessionKernel {
         const shell = this.shell;
         const iopub = this.iopub;
         const pump = this.iopubPump;
-        shell?.close();
-        iopub?.close();
+        try {
+            await shell?.close();
+        }
+        catch (closeError) {
+            this.kernelStderr += `[kernel] shell close failed: ${errorMessage(closeError)}\n`;
+        }
+        try {
+            await iopub?.close();
+        }
+        catch (closeError) {
+            this.kernelStderr += `[kernel] IOPub close failed: ${errorMessage(closeError)}\n`;
+        }
         this.shell = undefined;
         this.iopub = undefined;
         await pump?.catch(() => undefined);
@@ -805,7 +840,12 @@ export class SessionKernel {
         this.hostComms.clear();
         if (proc)
             await stopProcess(proc);
-        control?.close();
+        try {
+            await control?.close();
+        }
+        catch (closeError) {
+            this.kernelStderr += `[kernel] control close failed: ${errorMessage(closeError)}\n`;
+        }
         this.control = undefined;
         this.connection = undefined;
         this.controlQueue = Promise.resolve();

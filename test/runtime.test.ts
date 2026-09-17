@@ -606,6 +606,26 @@ test("an explicit interpreter overrides the automatic pixi default", () => {
 	}
 });
 
+test("interrupting an awaited cell leaves the IPython kernel usable", async () => {
+	const kernels = createKernelRuntime({ cwd: process.cwd(), runtimeDir: join(process.cwd(), "python") });
+	const kernel = new SessionKernel(kernels);
+	try {
+		await kernel.execute("print('ready')", undefined, undefined);
+		const controller = new AbortController();
+		const interrupted = kernel.execute("import asyncio\nawait asyncio.sleep(180)", undefined, controller.signal);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		controller.abort();
+		await assert.rejects(interrupted, { name: "AbortError" });
+
+		const result = await kernel.execute("print('alive')", undefined, undefined);
+		assert.equal(result.status, "ok");
+		assert.match(result.stdout, /alive/);
+	}
+	finally {
+		await kernel.dispose();
+	}
+});
+
 function stubKernels(projectRoot = "/tmp") {
 	const environments = [
 		{ name: "uv", label: "isolated uv environment", detail: "uv run", kind: "uv", command: "uv", commandArgs: [], cwd: "/tmp" },
