@@ -1,18 +1,18 @@
-# pi-rlm-runtime
+# pi-ipython-subagents
 
 A recursive language-model runtime for [Pi](https://github.com/earendil-works/pi), based on the architecture behind [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-pi-rlm-runtime lets Pi work beyond a single conversation context. It can retain a large working set, delegate independent work to nested sub-agents, and bring the useful results back into the main conversation.
+pi-ipython-subagents lets Pi work beyond a single conversation context. It can retain a large working set, delegate independent work to nested sub-agents, and bring the useful results back into the main conversation.
 
 ## Install
 
 Requires Node.js 22.19 or newer, Pi 0.84.x, and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-pi install npm:pi-rlm-runtime
+pi install npm:@lambdaloop/pi-ipython-subagents
 ```
 
-## Run Pi with pi-rlm-runtime
+## Run Pi with @lambdaloop/pi-ipython-subagents
 
 After installation, the runtime is enabled automatically for ordinary `pi` launches; no
 `--rlm-runtime` flag is needed. The legacy flag remains accepted. To disable it for one launch,

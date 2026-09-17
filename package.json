@@ -1,5 +1,5 @@
 {
-	"name": "pi-rlm-runtime",
+	"name": "@lambdaloop/pi-ipython-subagents",
 	"version": "0.1.1",
 	"description": "Recursive language model runtime for Pi",
 	"repository": {
