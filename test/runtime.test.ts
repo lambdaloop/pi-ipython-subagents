@@ -670,6 +670,8 @@ test("a healthy materialized pixi environment is the default kernel", () => {
 		assert.equal(pixi.python, python);
 		assert.equal(pixi.command, "pixi");
 		assert.deepEqual(pixi.commandArgs.slice(0, 4), ["run", "--manifest-path", project, "--environment"]);
+		assert.equal(runtime.command, python);
+		assert.deepEqual(runtime.commandArgs, []);
 		assert.match(runtime.describe(pixi).join("\n"), /pixi.*active/);
 		runtime.apply(runtime.find("uv"));
 		assert.equal(runtime.active, "uv");

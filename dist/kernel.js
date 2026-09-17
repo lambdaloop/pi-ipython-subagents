@@ -86,8 +86,11 @@ export function createKernelRuntime(options) {
             this.active = spec.name;
             this.activeSpec = spec;
             this.cwd = spec.cwd;
-            this.command = spec.command;
-            this.commandArgs = [...spec.commandArgs];
+            // Pixi's launcher can take many seconds to resolve an already
+            // materialized environment. The environment's interpreter is
+            // self-contained, so launch it directly after the Pixi smoke test.
+            this.command = spec.kind === "pixi" ? spec.python : spec.command;
+            this.commandArgs = spec.kind === "pixi" ? [] : [...spec.commandArgs];
             this.kernelEnv = {
                 ...baseEnv,
                 PYTHONPATH: [options.runtimeDir, ...extraPaths, process.env.PYTHONPATH].filter(Boolean).join(delimiter),
@@ -509,6 +512,7 @@ export class SessionKernel {
         const proc = spawn(this.runtime.command, [...this.runtime.commandArgs, "-m", "ipykernel_launcher", "-f", connection.path], {
             cwd: this.runtime.cwd,
             env: this.runtime.kernelEnv,
+            detached: process.platform !== "win32",
             stdio: ["ignore", "ignore", "pipe"],
         });
         this.kernel = proc;
@@ -1142,20 +1146,21 @@ async function stopProcess(proc) {
     const closed = once(proc, "close").then(() => true, () => true);
     if (await Promise.race([closed, sleep(GRACEFUL_SHUTDOWN_MS).then(() => false)]))
         return;
-    try {
-        proc.kill("SIGTERM");
-    }
-    catch {
-        return;
-    }
+    const signal = (name) => {
+        try {
+            if (process.platform !== "win32" && proc.pid)
+                process.kill(-proc.pid, name);
+            else
+                proc.kill(name);
+        }
+        catch {
+            // The process may have exited between the close check and signal.
+        }
+    };
+    signal("SIGTERM");
     if (await Promise.race([closed, sleep(PROCESS_EXIT_TIMEOUT_MS).then(() => false)]))
         return;
-    try {
-        proc.kill("SIGKILL");
-    }
-    catch {
-        return;
-    }
+    signal("SIGKILL");
     await closed;
 }
 function abortError() {
