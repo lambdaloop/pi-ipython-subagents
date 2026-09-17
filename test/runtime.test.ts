@@ -296,6 +296,47 @@ test("Shift+Up/Down selects a sub-agent and Enter opens its transcript", async (
 	}
 });
 
+test("nested background tasks can be selected and inspected", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-nested-task-"));
+	const logPath = join(root, "task.log");
+	writeFileSync(logPath, "progress 42%\n");
+	const nestedTask = {
+		id: "task-1",
+		name: "deeperfly-direct-run",
+		status: "running",
+		kind: "task",
+		command: "$ time pixi run python infer.py",
+		cwd: root,
+		log_path: logPath,
+		subagents: [],
+	};
+	const runtime = {
+		listSubagents: () => [],
+		listActiveSubagents: () => [{ name: "worker", status: "running", subagents: [nestedTask] }],
+		tasks: { list: () => [], find: () => undefined },
+		listInspectable() { return SessionRuntime.prototype.listInspectable.call(this); },
+		subagentTranscript(target) { return SessionRuntime.prototype.subagentTranscript.call(this, target); },
+	};
+	let customCalls = 0;
+	const notices: string[] = [];
+	const ctx = {
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			notify: (message) => notices.push(message),
+			custom: async () => { customCalls++; },
+		},
+	};
+	try {
+		await browseSubagent(ctx, runtime, nestedTask.name);
+		assert.equal(customCalls, 1);
+		assert.deepEqual(notices, []);
+		assert.match(runtime.subagentTranscript(nestedTask.name), /progress 42%/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("subagent browser scrolls, preserves position, supports wheel, and cleans up", async () => {
 	let component;
 	let closed = false;

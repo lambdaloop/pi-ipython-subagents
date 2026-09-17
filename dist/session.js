@@ -61,6 +61,13 @@ export class SessionRuntime {
             .map(runningSubagentInfo);
     }
     listInspectable() {
+        const nestedTasks = nestedTaskSnapshots(this.listActiveSubagents().flatMap((item) => item.subagents ?? [])).map((task) => ({
+            id: task.id,
+            name: task.name,
+            model: "background",
+            status: task.status,
+            kind: "task",
+        }));
         return [
             ...this.listSubagents(),
             ...this.tasks.list().map((task) => ({
@@ -70,12 +77,16 @@ export class SessionRuntime {
                 status: task.status,
                 kind: "task",
             })),
+            ...nestedTasks,
         ].sort((left, right) => left.name.localeCompare(right.name));
     }
     subagentTranscript(target) {
         const task = this.tasks.find(target);
         if (task)
             return this.tasks.transcript(task.id);
+        const nestedTask = findNestedTask(this.listActiveSubagents(), target);
+        if (nestedTask)
+            return nestedTaskTranscript(nestedTask);
         const subagent = this.require(target);
         const session = subagent.agent?.session;
         const messages = session ? [...session.messages] : loadTranscriptFile(subagent.sessionFile);
@@ -120,6 +131,8 @@ export class SessionRuntime {
                 status: task.status === "running" ? "running" : "idle",
                 taskStatus: task.status,
                 kind: "task",
+                cwd: task.cwd,
+                log_path: task.log_path,
                 command: `$ ${task.command}`,
                 output: task.last_line ?? undefined,
                 // Keep the start time in the preview model. A nested runtime
@@ -743,6 +756,35 @@ export class SessionRuntime {
         this.options.subagentsChanged?.();
         this.options.parent?.updateSubagents(this.me(), this.listActiveSubagents());
     }
+}
+function nestedTaskSnapshots(subagents) {
+    const tasks = [];
+    for (const subagent of subagents) {
+        if (subagent.kind === "task")
+            tasks.push(subagent);
+        tasks.push(...nestedTaskSnapshots(subagent.subagents ?? []));
+    }
+    return tasks;
+}
+function findNestedTask(subagents, target) {
+    for (const task of nestedTaskSnapshots(subagents)) {
+        if (task.id === target || task.name === target)
+            return task;
+    }
+    return undefined;
+}
+function nestedTaskTranscript(task) {
+    let logs = "";
+    if (task.log_path) {
+        try {
+            logs = readFileSync(task.log_path, "utf8").slice(-50_000);
+        }
+        catch {
+            // The child may finish and remove its temporary log during refresh.
+        }
+    }
+    const header = `Background task · ${task.name} · ${task.status}\nCommand: ${task.command?.replace(/^\\$ /, "") ?? ""}\nWorking directory: ${task.cwd ?? "unknown"}\nLog: ${task.log_path ?? "unavailable"}`;
+    return `${header}\n\n${logs || "(no output yet)"}`;
 }
 function loadTranscriptFile(sessionFile) {
     if (!sessionFile || !existsSync(sessionFile))
