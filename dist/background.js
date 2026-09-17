@@ -52,6 +52,7 @@ export class BackgroundTasks {
             process: undefined,
             killReason: undefined,
             timeout: undefined,
+            previewNotify: undefined,
             notify: options.notify !== false,
             done: undefined,
         };
@@ -81,8 +82,20 @@ export class BackgroundTasks {
             const text = String(chunk);
             output.write(text);
             task.preview = `${task.preview}${text}`.slice(-MAX_PREVIEW_BYTES);
-            const lines = task.preview.split(/\r?\n/);
+            const lines = task.preview.split(/\r\n|\n|\r/);
             task.lastLine = (lines.at(-1) ? lines.at(-1) : lines.at(-2) ?? "").trim().slice(-240);
+            // Propagate output previews while the process is still running. This
+            // is especially important for tasks started by a sub-agent: their
+            // parent only has the snapshots sent through onChange. Coalesce
+            // bursts from chatty processes so output cannot flood the UI.
+            if (!task.previewNotify) {
+                task.previewNotify = setTimeout(() => {
+                    task.previewNotify = undefined;
+                    if (task.status === "running")
+                        this.options.onChange?.();
+                }, 100);
+                task.previewNotify.unref?.();
+            }
         };
         child.stdout?.on("data", onData);
         child.stderr?.on("data", onData);
@@ -219,6 +232,9 @@ export class BackgroundTasks {
         if (task.timeout)
             clearTimeout(task.timeout);
         task.timeout = undefined;
+        if (task.previewNotify)
+            clearTimeout(task.previewNotify);
+        task.previewNotify = undefined;
         task.status = status;
         task.exitCode = code ?? undefined;
         task.signal = signal ?? undefined;

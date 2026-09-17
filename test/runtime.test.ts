@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -126,6 +127,52 @@ test("RLM appends its prompt and shuts down cleanly", async () => {
 	assert.equal(ipython.parameters.properties.timeout_seconds.minimum, 1);
 	assert.equal(ipython.parameters.properties.timeout_seconds.maximum, 3600);
 	await mock.events.get("session_shutdown")({}, ctx);
+});
+
+test("nested running command previews retain their live phase", () => {
+	let widget: string[] = [];
+	const ctx = {
+		hasUI: true,
+		ui: {
+			theme: { fg: (_color, text) => text },
+			setWidget: (_id, value) => { widget = value; },
+		},
+	};
+	showSubagents(ctx, {
+		listActiveSubagents: () => [{
+			name: "nested-agent",
+			status: "running",
+			startedAt: Date.now() - 65_000,
+			activity: "running ipython 0ms",
+			command: "$ task = await bg(\"work\")",
+			subagents: [],
+		}],
+	}, true);
+	assert.match(widget.join("\n"), /running ipython 1m 5s/);
+});
+
+test("running task previews refresh their duration from the start time", () => {
+	let widget: string[] = [];
+	const ctx = {
+		hasUI: true,
+		ui: {
+			theme: { fg: (_color, text) => text },
+			setWidget: (_id, value) => { widget = value; },
+		},
+	};
+	showSubagents(ctx, {
+		listActiveSubagents: () => [{
+			name: "long-running-process",
+			status: "running",
+			kind: "task",
+			taskStatus: "running",
+			startedAt: Date.now() - 65_000,
+			activity: "running 0ms",
+			command: "$ long-running-process",
+			subagents: [],
+		}],
+	}, true);
+	assert.match(widget.join("\n"), /running 1m 5s/);
 });
 
 test("background tasks are marked distinctly in the sub-agent tree", () => {
@@ -399,6 +446,37 @@ test("background tasks default to a 60-second process timeout", async () => {
 		await tasks.wait(started.id);
 	} finally {
 		globalThis.setTimeout = originalSetTimeout;
+		await tasks.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("background task output updates the live preview", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-bg-preview-"));
+	const changes = [];
+	const child = Object.assign(new EventEmitter(), {
+		pid: 1234,
+		stdout: new EventEmitter(),
+		stderr: new EventEmitter(),
+		kill() { this.emit("close", 0, null); },
+	});
+	const tasks = new BackgroundTasks({
+		cwd: root,
+		logDir: join(root, "tasks"),
+		spawn: () => child,
+		onChange: () => changes.push(true),
+	});
+	try {
+		const started = tasks.start({ command: "long-running-process", name: "preview" });
+		assert.equal(changes.length, 1);
+		child.stdout.emit("data", "progress 42%\n");
+		child.stdout.emit("data", "step 1\rstep 2");
+		assert.equal(tasks.status(started.id).last_line, "step 2");
+		await new Promise((resolve) => setTimeout(resolve, 125));
+		assert.equal(changes.length, 2);
+		child.emit("close", 0, null);
+		assert.equal((await tasks.wait(started.id)).status, "completed");
+	} finally {
 		await tasks.dispose();
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -840,6 +918,7 @@ test("the sub-agent panel shows live elapsed time for a running command", () => 
 		tasks: { list: () => [] },
 	});
 	assert.match(active[0].activity, /^running ipython 5\.0s$/);
+	assert.ok(active[0].startedAt <= Date.now() - 5000);
 });
 
 test("the ipython row renders like a shell command with elapsed and total time", () => {

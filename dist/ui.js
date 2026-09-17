@@ -7,6 +7,14 @@ const MAX_NAME_PREVIEW_CHARS = 48;
 const MAX_ACTIVITY_PREVIEW_CHARS = 48;
 const MAX_DETAIL_PREVIEW_CHARS = 120;
 const MAX_DETAIL_FIELD_CHARS = 80;
+function formatDuration(milliseconds) {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+    if (seconds >= 3600)
+        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m ${seconds % 60}s`;
+    if (seconds >= 60)
+        return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    return milliseconds < 1000 ? `${Math.max(0, Math.round(milliseconds))}ms` : `${(milliseconds / 1000).toFixed(1)}s`;
+}
 function previewText(value, maxChars) {
     const text = String(value ?? "")
         .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
@@ -14,6 +22,21 @@ function previewText(value, maxChars) {
         .replace(/\s+/g, " ")
         .trim();
     return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
+}
+function liveActivity(subagent) {
+    if (subagent.status !== "running" || !Number.isFinite(subagent.startedAt))
+        return subagent.activity;
+    const elapsed = formatDuration(Date.now() - subagent.startedAt);
+    if (subagent.kind === "task")
+        return `running ${elapsed}`;
+    const activity = String(subagent.activity ?? "");
+    if (/^running\s+\S+/.test(activity))
+        return `running ${activity.slice("running ".length).split(/\s+/)[0]} ${elapsed}`;
+    if (/^thinking\b/.test(activity))
+        return `thinking ${elapsed}`;
+    if (/^starting\b/.test(activity))
+        return `starting ${elapsed}`;
+    return activity;
 }
 class PreservingScrollView extends ScrollView {
     updateLayout(contentHeight, viewportHeight, requestRender) {
@@ -213,7 +236,7 @@ function formatSubagent(ctx, prefix, subagent, selected = false) {
         ? ctx.ui.theme.fg(subagent.taskStatus === "failed" ? "error" : subagent.taskStatus === "completed" ? "success" : "muted", `◆ ${subagent.taskStatus ?? subagent.status}`)
         : subagent.status === "running" ? ctx.ui.theme.fg("success", "● running") : ctx.ui.theme.fg("muted", "idle");
     const name = previewText(subagent.name, MAX_NAME_PREVIEW_CHARS);
-    const activity = previewText(subagent.activity, MAX_ACTIVITY_PREVIEW_CHARS);
+    const activity = previewText(liveActivity(subagent), MAX_ACTIVITY_PREVIEW_CHARS);
     const detail = previewText([
         previewText(subagent.command, MAX_DETAIL_FIELD_CHARS),
         subagent.output && `↳ ${previewText(subagent.output, MAX_DETAIL_FIELD_CHARS)}`,

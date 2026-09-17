@@ -99,6 +99,10 @@ export class SessionRuntime {
                 status: currentStatus,
                 command: subagent.command,
                 output: subagent.output,
+                // Preserve the live phase start time when forwarding nested
+                // snapshots so the root UI can refresh elapsed time even when
+                // the child runtime has no TUI of its own.
+                startedAt: subagent.toolName ? subagent.toolStartedAt : subagent.thinkingStartedAt,
                 activity: subagent.toolName && subagent.toolStartedAt
                     ? `running ${subagent.toolName} ${formatDuration(Date.now() - subagent.toolStartedAt)}`
                     : subagent.thinkingStartedAt
@@ -118,6 +122,11 @@ export class SessionRuntime {
                 kind: "task",
                 command: `$ ${task.command}`,
                 output: task.last_line ?? undefined,
+                // Keep the start time in the preview model. A nested runtime
+                // forwards snapshots to its parent, so the formatted duration
+                // in `activity` would otherwise remain stuck at its initial
+                // value until the task emits output or exits.
+                startedAt: task.started_at,
                 activity: task.status === "running"
                     ? `running ${formatDuration(task.duration_ms)}`
                     : task.status,
