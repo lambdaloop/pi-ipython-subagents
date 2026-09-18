@@ -22,6 +22,8 @@ from pi_rlm_runtime import rg_files, rg_search
 files = rg_files("*.py", ${JSON.stringify(root)})
 assert sorted(path.rsplit("/", 1)[-1] for path in files) == ["metric.py", "train.py"]
 assert files[0].rsplit("/", 1)[-1] in ("metric.py", "train.py")
+assert isinstance(files[:100], list)
+assert list(files) == files[:]
 assert sorted(path.rsplit("/", 1)[-1] for path in files.paths) == ["metric.py", "train.py"]
 
 result = rg_search(r"needle|jaccard", ${JSON.stringify(root)}, glob="*.py")
