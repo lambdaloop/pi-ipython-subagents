@@ -9,6 +9,7 @@ import { RLM_USAGE_ENTRY, SessionRuntime } from "./session.js";
 import { loadRecursion, MAX_DEPTH } from "./state.js";
 import { SUBAGENT_EXTENSION_NAME } from "./subagent.js";
 import { browseSubagent, showSubagents, subagentTreeView } from "./ui.js";
+
 const IPYTHON_TOOL = "ipython";
 const DISABLED_MAIN_TOOLS = new Set(["bash", "powershell"]);
 const RUNTIME_FLAG = "rlm-runtime";

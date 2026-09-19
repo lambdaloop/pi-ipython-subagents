@@ -1,4 +1,5 @@
 import { Key, matchesKey, ScrollView, Text, VStack } from "@earendil-works/pi-tui";
+
 const SUBAGENTS_WIDGET = "pi-rlm-runtime-subagents";
 const MAX_VISIBLE_SUBAGENTS = 12;
 const MAX_PREVIEW_LINES = 2;

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+
 const MAX_TASKS = 32;
 const MAX_NAME = 64;
 const MAX_LOG_BYTES = 50_000;
@@ -9,6 +10,7 @@ const MAX_PREVIEW_BYTES = 64 * 1024;
 const KILL_GRACE_MS = 3_000;
 const MAX_MESSAGE = 16_384;
 const DEFAULT_TIMEOUT_SECONDS = 60;
+
 export class BackgroundTasks {
     tasks = new Map();
     constructor(options) {

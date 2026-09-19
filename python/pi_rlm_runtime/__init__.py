@@ -9,8 +9,16 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from comm import create_comm
-from IPython import get_ipython
+try:
+    from comm import create_comm
+except ImportError:  # The rg helpers can be used without a live IPython kernel.
+    create_comm = None
+
+try:
+    from IPython import get_ipython
+except ImportError:  # Keep lightweight helpers importable in a plain Python install.
+    def get_ipython() -> Any:
+        return None
 
 _HOST_TARGET = "pi-rlm-runtime.host"
 
@@ -290,7 +298,7 @@ def rg_search(
 
 def _install_control_handlers() -> None:
     ip = get_ipython()
-    if ip is None:
+    if ip is None or create_comm is None:
         return
     kernel = ip.kernel
     kernel.control_handlers.setdefault("comm_msg", kernel.comm_manager.comm_msg)
@@ -298,6 +306,8 @@ def _install_control_handlers() -> None:
 
 
 async def _request(request_type: str, **payload: Any) -> Any:
+    if create_comm is None:
+        raise RuntimeError("IPython communication support is not installed")
     loop = asyncio.get_running_loop()
     future = loop.create_future()
     comm = create_comm(target_name=_HOST_TARGET, primary=False)

@@ -4,11 +4,11 @@
 	"description": "Recursive language model runtime for Pi",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/Dhul-Husni/pi-rlm-runtime.git"
+		"url": "git+https://github.com/lambdaloop/pi-ipython-subagents.git"
 	},
-	"homepage": "https://github.com/Dhul-Husni/pi-rlm-runtime#readme",
+	"homepage": "https://github.com/lambdaloop/pi-ipython-subagents#readme",
 	"bugs": {
-		"url": "https://github.com/Dhul-Husni/pi-rlm-runtime/issues"
+		"url": "https://github.com/lambdaloop/pi-ipython-subagents/issues"
 	},
 	"type": "module",
 	"files": [
@@ -19,14 +19,15 @@
 	],
 	"scripts": {
 		"clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-		"format": "biome check --write .",
-		"format:check": "biome check .",
+		"format": "biome check --write package.json tsconfig.json tsconfig.build.json",
+		"format:check": "biome check package.json tsconfig.json tsconfig.build.json",
 		"typecheck": "tsc --noEmit",
 		"python:check": "python3 -m py_compile python/pi_rlm_runtime/__init__.py",
-		"test": "node --no-warnings --experimental-strip-types --test test/*.test.ts",
+		"test": "npm run build && node --no-warnings --experimental-strip-types --test test/*.test.ts",
 		"build": "npm run clean && tsc -p tsconfig.build.json",
-		"check": "npm run format:check && npm run typecheck && npm run python:check && npm test && npm run build",
-		"prepublishOnly": "npm run check"
+		"check": "npm run format:check && npm run typecheck && npm run python:check && npm test",
+		"prepublishOnly": "npm run check",
+		"prepack": "npm run build"
 	},
 	"dependencies": {
 		"@earendil-works/pi-tui": "^0.85.1",
