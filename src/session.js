@@ -61,7 +61,16 @@ export class SessionRuntime {
             .map(runningSubagentInfo);
     }
     listInspectable() {
-        const nestedTasks = nestedTaskSnapshots(this.listActiveSubagents().flatMap((item) => item.subagents ?? [])).map((task) => ({
+        const nested = this.listActiveSubagents().flatMap((item) => item.subagents ?? []);
+        const nestedAgents = nestedSubagentSnapshots(nested).map((subagent) => ({
+            id: subagent.id,
+            name: subagent.name,
+            session_file: subagent.sessionFile ?? null,
+            model: "unknown",
+            status: subagent.status,
+            kind: "agent",
+        }));
+        const nestedTasks = nestedTaskSnapshots(nested).map((task) => ({
             id: task.id,
             name: task.name,
             model: "background",
@@ -77,6 +86,7 @@ export class SessionRuntime {
                 status: task.status,
                 kind: "task",
             })),
+            ...nestedAgents,
             ...nestedTasks,
         ].sort((left, right) => left.name.localeCompare(right.name));
     }
@@ -87,6 +97,9 @@ export class SessionRuntime {
         const nestedTask = findNestedTask(this.listActiveSubagents(), target);
         if (nestedTask)
             return nestedTaskTranscript(nestedTask);
+        const nestedAgent = findNestedAgent(this.listActiveSubagents(), target);
+        if (nestedAgent)
+            return nestedAgentTranscript(nestedAgent);
         const subagent = this.require(target);
         const session = subagent.agent?.session;
         const messages = session ? [...session.messages] : loadTranscriptFile(subagent.sessionFile);
@@ -107,6 +120,7 @@ export class SessionRuntime {
             active.push({
                 id: subagent.sessionId,
                 name: subagent.name,
+                sessionFile: subagent.sessionFile,
                 status: currentStatus,
                 command: subagent.command,
                 output: subagent.output,
@@ -757,6 +771,15 @@ export class SessionRuntime {
         this.options.parent?.updateSubagents(this.me(), this.listActiveSubagents());
     }
 }
+function nestedSubagentSnapshots(subagents) {
+    const agents = [];
+    for (const subagent of subagents) {
+        if (subagent.kind !== "task")
+            agents.push(subagent);
+        agents.push(...nestedSubagentSnapshots(subagent.subagents ?? []));
+    }
+    return agents;
+}
 function nestedTaskSnapshots(subagents) {
     const tasks = [];
     for (const subagent of subagents) {
@@ -772,6 +795,20 @@ function findNestedTask(subagents, target) {
             return task;
     }
     return undefined;
+}
+function findNestedAgent(subagents, target) {
+    for (const agent of nestedSubagentSnapshots(subagents)) {
+        if (agent.id === target || agent.name === target)
+            return agent;
+    }
+    return undefined;
+}
+function nestedAgentTranscript(agent) {
+    const messages = loadTranscriptFile(agent.sessionFile);
+    const body = messages.slice(-80).map(formatTranscriptMessage).filter(Boolean).join("\n\n");
+    if (body)
+        return body;
+    return `Sub-agent ${agent.name} is ${agent.status}.\nSession: ${agent.sessionFile ?? "not persisted"}`;
 }
 function nestedTaskTranscript(task) {
     let logs = "";

@@ -47,25 +47,30 @@ class PreservingScrollView extends ScrollView {
         }
     }
 }
-export function subagentTreeView(subagents, limit = MAX_VISIBLE_SUBAGENTS) {
-    const rows = [];
+export function subagentTreeView(subagents, limit = MAX_VISIBLE_SUBAGENTS, selectedName) {
+    const entries = [];
     let running = 0;
-    let total = 0;
     const visit = (siblings, ancestors) => {
         for (const [index, subagent] of siblings.entries()) {
             const last = index === siblings.length - 1;
-            total++;
             if (subagent.status === "running")
                 running++;
-            if (rows.length < limit) {
-                const indentation = ancestors.map((ancestorWasLast) => (ancestorWasLast ? "   " : "│  ")).join("");
-                rows.push({ prefix: `${indentation}${last ? "└─" : "├─"} `, subagent });
-            }
+            const indentation = ancestors.map((ancestorWasLast) => (ancestorWasLast ? "   " : "│  ")).join("");
+            entries.push({ prefix: `${indentation}${last ? "└─" : "├─"} `, subagent });
             visit(subagent.subagents, [...ancestors, last]);
         }
     };
     visit(subagents, []);
-    return { rows, running, total };
+    const selectedIndex = selectedName ? entries.findIndex(({ subagent }) => subagent.name === selectedName) : -1;
+    const start = selectedIndex < 0 ? 0 : Math.min(Math.max(0, selectedIndex - Math.floor(limit / 2)), Math.max(0, entries.length - limit));
+    const rows = entries.slice(start, start + limit);
+    return {
+        rows,
+        running,
+        total: entries.length,
+        before: start,
+        after: Math.max(0, entries.length - start - rows.length),
+    };
 }
 class SubagentBrowser extends VStack {
     constructor(tui, theme, name, runtime, done) {
@@ -213,7 +218,7 @@ export async function browseSubagent(ctx, runtime, requestedName) {
 export function showSubagents(ctx, runtime, expanded, selectedName) {
     if (!ctx.hasUI)
         return;
-    const view = subagentTreeView(runtime?.listActiveSubagents() ?? []);
+    const view = subagentTreeView(runtime?.listActiveSubagents() ?? [], MAX_VISIBLE_SUBAGENTS, selectedName);
     if (!view.total) {
         ctx.ui.setWidget(SUBAGENTS_WIDGET, undefined);
         return;
@@ -222,10 +227,12 @@ export function showSubagents(ctx, runtime, expanded, selectedName) {
     const hint = "Shift+↑/↓ select · Enter open · Ctrl+Alt+A";
     const lines = [ctx.ui.theme.fg("muted", `${header}  ${hint}`)];
     if (expanded) {
+        if (view.before)
+            lines.push(ctx.ui.theme.fg("dim", `   … ${view.before} more above`));
         for (const { prefix, subagent } of view.rows)
             lines.push(...formatSubagent(ctx, prefix, subagent, subagent.name === selectedName));
-        if (view.rows.length < view.total)
-            lines.push(ctx.ui.theme.fg("dim", `   … ${view.total - view.rows.length} more`));
+        if (view.after)
+            lines.push(ctx.ui.theme.fg("dim", `   … ${view.after} more below`));
     }
     ctx.ui.setWidget(SUBAGENTS_WIDGET, lines);
 }

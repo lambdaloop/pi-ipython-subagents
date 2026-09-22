@@ -12,7 +12,7 @@ import { buildPiRlmRuntimePrompt } from "../dist/prompt.js";
 import { createIpythonRenderers } from "../dist/render.js";
 import { SessionRuntime } from "../dist/session.js";
 import { filterChildExtensions, startSubagent, SUBAGENT_EXTENSION_NAME } from "../dist/subagent.js";
-import { browseSubagent, showSubagents } from "../dist/ui.js";
+import { browseSubagent, showSubagents, subagentTreeView } from "../dist/ui.js";
 import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
 
 function mockPi() {
@@ -296,6 +296,52 @@ test("Shift+Up/Down selects a sub-agent and Enter opens its transcript", async (
 	}
 });
 
+test("nested sub-agents can be selected and inspected", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-nested-agent-"));
+	const sessionFile = join(root, "nested-agent.jsonl");
+	writeFileSync(sessionFile, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "nested transcript" }] } })}\n`);
+	const nestedAgent = {
+		id: "nested-agent-id",
+		name: "context-inspector",
+		status: "running",
+		sessionFile,
+		subagents: [],
+	};
+	const runtime = {
+		listSubagents: () => [],
+		listActiveSubagents: () => [{ name: "worker", status: "running", subagents: [nestedAgent] }],
+		tasks: { list: () => [], find: () => undefined },
+		listInspectable() { return SessionRuntime.prototype.listInspectable.call(this); },
+		subagentTranscript(target) { return SessionRuntime.prototype.subagentTranscript.call(this, target); },
+	};
+	let customCalls = 0;
+	const notices: string[] = [];
+	const ctx = {
+		hasUI: true,
+		mode: "tui",
+		ui: {
+			notify: (message) => notices.push(message),
+			custom: async () => { customCalls++; },
+		},
+	};
+	try {
+		assert.deepEqual(runtime.listInspectable().find((item) => item.name === nestedAgent.name), {
+			id: nestedAgent.id,
+			name: nestedAgent.name,
+			session_file: sessionFile,
+			model: "unknown",
+			status: "running",
+			kind: "agent",
+		});
+		await browseSubagent(ctx, runtime, nestedAgent.name);
+		assert.equal(customCalls, 1);
+		assert.deepEqual(notices, []);
+		assert.match(runtime.subagentTranscript(nestedAgent.name), /nested transcript/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("nested background tasks can be selected and inspected", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-nested-task-"));
 	const logPath = join(root, "task.log");
@@ -335,6 +381,31 @@ test("nested background tasks can be selected and inspected", async () => {
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("sub-agent selection keeps the selected row visible through overflow", () => {
+	let widget: string[] = [];
+	const ctx = {
+		hasUI: true,
+		ui: {
+			theme: { fg: (_color, text) => text },
+			setWidget: (_id, value) => { widget = value; },
+		},
+	};
+	const subagents = Array.from({ length: 15 }, (_, index) => ({
+		name: `agent-${index}`,
+		status: "running",
+		subagents: [],
+	}));
+	const view = subagentTreeView(subagents, 12, "agent-14");
+	assert.equal(view.rows.at(-1).subagent.name, "agent-14");
+	showSubagents(ctx, { listActiveSubagents: () => subagents }, true, "agent-14");
+	assert.match(widget.join("\n"), /agent-14/);
+	assert.match(widget.join("\n"), /more above/);
+	assert.doesNotMatch(widget.join("\n"), /more below/);
+	showSubagents(ctx, { listActiveSubagents: () => subagents }, true, "agent-0");
+	assert.match(widget.join("\n"), /agent-0/);
+	assert.match(widget.join("\n"), /more below/);
 });
 
 test("subagent browser scrolls, preserves position, supports wheel, and cleans up", async () => {
