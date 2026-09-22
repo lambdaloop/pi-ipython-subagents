@@ -91,7 +91,8 @@ finished = await task.wait()
 The task runs with the session's shell environment and working directory. It is killed after 60
 seconds by default; pass `timeout_seconds` explicitly for a longer command. Use `pixi run ...` when
 project dependencies are needed. `bg(...)` is available to the main agent and to ipython-only
-sub-agents; completion notifications wake the owning session.
+sub-agents. A sub-agent remains alive while it owns running background tasks or child sub-agents;
+completion notifications wake the owning session.
 
 ## Python environment
 

@@ -568,6 +568,8 @@ export class SessionRuntime {
             return;
         subagent.subagents = subagents;
         this.notifySubagents();
+        if (subagent.waiting && !hasActiveDescendantWork(subagents))
+            this.scheduleWaitingCompletion(subagent);
     }
     async fromSubagent(message, from, to) {
         this.open();
@@ -578,6 +580,8 @@ export class SessionRuntime {
             this.here(message, from);
             if (subagent.run && subagent.run.replyTo === undefined)
                 subagent.run.replied = true;
+            else if (subagent.waiting)
+                subagent.waiting.replied = true;
             return;
         }
         const sibling = this.require(to.sibling);
@@ -613,6 +617,8 @@ export class SessionRuntime {
         return entries;
     }
     async toSubagent(subagent, message, from, fromRelationship, force = false) {
+        if (subagent.closing)
+            throw new Error(`Sub-agent ${JSON.stringify(subagent.name)} is closing`);
         const agent = subagent.agent ?? (await this.reopen(subagent));
         if (this.closed || this.subagents.get(subagent.sessionId) !== subagent) {
             await agent.close().catch(() => undefined);
@@ -702,6 +708,8 @@ export class SessionRuntime {
         subagent.unsubscribe = agent.session.subscribe((event) => {
             updateSubagentActivity(subagent, event);
             this.notifySubagents();
+            if (event.type === "agent_settled")
+                this.maybeFinishWaiting(subagent);
         });
         this.notifySubagents();
     }
@@ -716,11 +724,61 @@ export class SessionRuntime {
         delete subagent.run;
         if (this.closed || this.subagents.get(subagent.sessionId) !== subagent)
             return;
+        const state = { replied: run.replied, failure };
+        if (hasActiveDescendantWork(subagent.subagents)) {
+            // A sub-agent can leave work behind in its own runtime. Keep its
+            // session alive so descendant completion notifications can wake it
+            // and so the parent can continue to observe the work.
+            subagent.waiting = state;
+            this.notifySubagents();
+            this.scheduleWaitingCompletion(subagent);
+            return;
+        }
+        await this.finishSubagent(subagent, state);
+    }
+    scheduleWaitingCompletion(subagent) {
+        if (subagent.waitingCheck || !subagent.waiting)
+            return;
+        const check = setTimeout(() => {
+            delete subagent.waitingCheck;
+            this.maybeFinishWaiting(subagent);
+        }, 0);
+        check.unref?.();
+        subagent.waitingCheck = check;
+    }
+    maybeFinishWaiting(subagent) {
+        if (!subagent.waiting || subagent.run || this.closed || this.subagents.get(subagent.sessionId) !== subagent)
+            return;
+        if (hasActiveDescendantWork(subagent.subagents))
+            return;
+        if (subagent.agent?.session.isStreaming) {
+            // A completion notification may have just started a follow-up turn.
+            // Let its agent_settled event perform the final check.
+            return;
+        }
+        const state = subagent.waiting;
+        void this.finishSubagent(subagent, state).catch(() => undefined);
+    }
+    async finishSubagent(subagent, state) {
+        if (this.closed || this.subagents.get(subagent.sessionId) !== subagent || subagent.run)
+            return;
+        if (hasActiveDescendantWork(subagent.subagents)) {
+            subagent.waiting = state;
+            return;
+        }
         const agent = subagent.agent;
+        if (subagent.closing)
+            return;
+        subagent.closing = true;
+        subagent.waiting = undefined;
+        if (subagent.waitingCheck) {
+            clearTimeout(subagent.waitingCheck);
+            delete subagent.waitingCheck;
+        }
         try {
-            if (!run.replied) {
+            if (!state.replied) {
                 const result = lastAssistant(agent?.session);
-                const error = failure ?? result.error;
+                const error = state.failure ?? result.error;
                 const message = (error ? `Task failed: ${error}` : result.text ? `Task finished:\n\n${result.text}` : "Task finished.").slice(0, MAX_MESSAGE);
                 this.here(message, { id: subagent.sessionId, name: subagent.name, depth: this.depth + 1 });
             }
@@ -729,12 +787,14 @@ export class SessionRuntime {
             if (agent && subagent.agent === agent && this.subagents.get(subagent.sessionId) === subagent) {
                 subagent.unsubscribe?.();
                 delete subagent.unsubscribe;
-                const closing = agent.close();
-                delete subagent.agent;
-                delete subagent.subagents;
-                this.notifySubagents();
-                await closing.catch(() => undefined);
+                await agent.close().catch(() => undefined);
+                if (subagent.agent === agent) {
+                    delete subagent.agent;
+                    delete subagent.subagents;
+                    this.notifySubagents();
+                }
             }
+            delete subagent.closing;
         }
     }
     me() {
@@ -770,6 +830,9 @@ export class SessionRuntime {
         this.options.subagentsChanged?.();
         this.options.parent?.updateSubagents(this.me(), this.listActiveSubagents());
     }
+}
+function hasActiveDescendantWork(subagents = []) {
+    return subagents.some((subagent) => subagent.kind === "task" ? subagent.status === "running" : true);
 }
 function nestedSubagentSnapshots(subagents) {
     const agents = [];

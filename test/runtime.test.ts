@@ -863,6 +863,54 @@ function runtimeWith(kernels) {
 	});
 }
 
+test("sub-agents stay alive while descendants are running", async () => {
+	const runtime = runtimeWith(stubKernels());
+	let closed = 0;
+	const run = { finished: Promise.resolve(), replied: true };
+	const child = {
+		sessionId: "child-id",
+		name: "child",
+		run,
+		subagents: [{ id: "task-id", name: "long-task", kind: "task", status: "running" }],
+		agent: {
+			session: { isStreaming: false, messages: [] },
+			close: async () => { closed++; },
+		},
+	};
+	runtime.subagents.set(child.sessionId, child);
+	try {
+		await runtime.subagentFinished(child, run);
+		assert.equal(closed, 0);
+		assert.ok(child.waiting);
+		runtime.updateSubagents({ id: child.sessionId }, []);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(closed, 1);
+		assert.equal(child.agent, undefined);
+	} finally {
+		await runtime.dispose();
+	}
+});
+
+test("failed background task startup refreshes nested snapshots", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-rlm-runtime-bg-start-failure-"));
+	const changes: number[] = [];
+	const tasks = new BackgroundTasks({
+		cwd: root,
+		logDir: join(root, "tasks"),
+		onChange: () => changes.push(tasks.list().length),
+		spawn: () => { throw new Error("spawn failed"); },
+	});
+	try {
+		assert.throws(() => tasks.start({ command: "will-fail", name: "will-fail" }), /spawn failed/);
+		assert.deepEqual(tasks.list(), []);
+		assert.deepEqual(changes, [1, 0]);
+	} finally {
+		await tasks.dispose();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("force_send aborts a running sub-agent before delivering its message", async () => {
 	const runtime = runtimeWith(stubKernels());
 	const calls = [];

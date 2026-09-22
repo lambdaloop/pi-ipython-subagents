@@ -72,6 +72,7 @@ export class BackgroundTasks {
         catch (error) {
             output.end();
             this.tasks.delete(id);
+            this.options.onChange?.();
             throw error;
         }
         task.process = child;
@@ -152,9 +153,13 @@ export class BackgroundTasks {
         const task = this.get(target);
         if (task.status !== "running")
             return this.snapshot(task);
-        task.killReason = reason;
-        if (reason === "timeout")
-            task.error = "Background task timed out";
+        // The timeout, user, and session-shutdown paths can race. Preserve
+        // the first reason so terminal status and notifications are stable.
+        if (!task.killReason) {
+            task.killReason = reason;
+            if (reason === "timeout")
+                task.error = "Background task timed out";
+        }
         this.signal(task, "SIGTERM");
         await Promise.race([task.done, delay(KILL_GRACE_MS)]);
         if (task.status === "running")
@@ -240,9 +245,13 @@ export class BackgroundTasks {
         const finalize = () => {
             const snapshot = this.snapshot(task);
             task.resolveDone?.(snapshot);
-            this.options.onChange?.();
+            // Wake the owning session before publishing the task's terminal
+            // snapshot. For nested runtimes this lets the parent observe the
+            // follow-up turn before it sees the task disappear from the active
+            // tree.
             if (task.notify)
                 this.options.notify?.(this.completionMessage(snapshot), snapshot);
+            this.options.onChange?.();
         };
         task.output.end(finalize);
     }
