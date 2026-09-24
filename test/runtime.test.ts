@@ -122,7 +122,7 @@ test("/ipython-subagent sets and persists a default model", async () => {
 		cwd: "/tmp",
 		hasUI: false,
 		mode: "print",
-		scopedModels: [],
+		scopedModels: [{ model: models[0] }],
 		modelRegistry: {
 			getAvailable: () => models,
 			find: (provider, id) => models.find((model) => model.provider === provider && model.id === id),
@@ -152,7 +152,7 @@ test("/ipython-subagent sets and persists a default model", async () => {
 	assert.equal(selectionPrompt, "Default IPython sub-agent model");
 	assert.deepEqual(selectionChoices, [
 		"Use current model",
-		"Fast model (test/fast)",
+		"Fast model (test/fast) · Ctrl+P",
 		"Strong model (test/strong)",
 	]);
 	assert.equal(mock.entries.at(-1).data.model, "test/strong");

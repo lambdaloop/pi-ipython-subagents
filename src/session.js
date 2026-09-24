@@ -58,7 +58,7 @@ export class SessionRuntime {
         return this.defaultModelSelector;
     }
     setDefaultSubagentModel(selector) {
-        if (selector && !sessionModels(this.ctx).some(({ provider, id }) => `${provider}/${id}` === selector))
+        if (selector && !this.ctx.modelRegistry.getAvailable().some(({ provider, id }) => `${provider}/${id}` === selector))
             throw new Error(`Sub-agent model is unavailable: ${selector}`);
         this.defaultModelSelector = selector;
         this.options.pi.appendEntry(DEFAULT_SUBAGENT_MODEL_ENTRY, defaultSubagentModel(this.sessionId, selector));
@@ -433,7 +433,7 @@ export class SessionRuntime {
         const selectedModel = modelSelector ?? this.defaultModelSelector;
         let model = this.ctx.model;
         if (selectedModel) {
-            model = sessionModels(this.ctx).find(({ provider, id }) => `${provider}/${id}` === selectedModel);
+            model = this.ctx.modelRegistry.getAvailable().find(({ provider, id }) => `${provider}/${id}` === selectedModel);
             if (!model)
                 throw new Error(`Sub-agent model is unavailable: ${selectedModel}`);
         }

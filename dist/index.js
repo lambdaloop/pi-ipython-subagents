@@ -296,10 +296,19 @@ function bindExtension(pi, subagent, registerStop) {
                     ctx.ui.notify(`Default IPython sub-agent model: ${requested}`, "info");
                     return;
                 }
-                const models = ctx.scopedModels.length ? ctx.scopedModels.map(({ model }) => model) : ctx.modelRegistry.getAvailable();
+                const models = ctx.modelRegistry.getAvailable();
+                const scopedSelectors = new Set(ctx.scopedModels.map(({ model }) => `${model.provider}/${model.id}`));
                 const current = live.getDefaultSubagentModel();
-                const choices = models.map((model) => `${model.name} (${model.provider}/${model.id})`);
-                const modelByChoice = new Map(models.map((model) => [`${model.name} (${model.provider}/${model.id})`, `${model.provider}/${model.id}`]));
+                const choices = models.map((model) => {
+                    const selector = `${model.provider}/${model.id}`;
+                    const name = model.name || model.id;
+                    return `${name} (${selector})${scopedSelectors.has(selector) ? " · Ctrl+P" : ""}`;
+                });
+                const modelByChoice = new Map(models.map((model) => {
+                    const selector = `${model.provider}/${model.id}`;
+                    const name = model.name || model.id;
+                    return [`${name} (${selector})${scopedSelectors.has(selector) ? " · Ctrl+P" : ""}`, selector];
+                }));
                 choices.unshift("Use current model");
                 if (!ctx.hasUI || typeof ctx.ui.select !== "function") {
                     ctx.ui.notify(`Default IPython sub-agent model: ${current ?? "current session model"}. Run /ipython-subagent provider/model or /ipython-subagent off to change it.`, "info");
