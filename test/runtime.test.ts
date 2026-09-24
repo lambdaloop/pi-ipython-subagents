@@ -140,6 +140,22 @@ test("/ipython-subagent sets and persists a default model", async () => {
 	assert.match(notices.at(-1), /test\/strong/);
 	await command.handler("off", ctx);
 	assert.equal(mock.entries.at(-1).data.model, null);
+	let selectionPrompt;
+	let selectionChoices;
+	ctx.hasUI = true;
+	ctx.ui.select = async (prompt, choices) => {
+		selectionPrompt = prompt;
+		selectionChoices = choices;
+		return "Strong model (test/strong)";
+	};
+	await command.handler("", ctx);
+	assert.equal(selectionPrompt, "Default IPython sub-agent model");
+	assert.deepEqual(selectionChoices, [
+		"Use current model",
+		"Fast model (test/fast)",
+		"Strong model (test/strong)",
+	]);
+	assert.equal(mock.entries.at(-1).data.model, "test/strong");
 	await mock.events.get("session_shutdown")({}, ctx);
 });
 

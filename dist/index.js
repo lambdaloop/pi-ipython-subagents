@@ -298,12 +298,9 @@ function bindExtension(pi, subagent, registerStop) {
                 }
                 const models = ctx.scopedModels.length ? ctx.scopedModels.map(({ model }) => model) : ctx.modelRegistry.getAvailable();
                 const current = live.getDefaultSubagentModel();
-                const choices = models.map((model) => ({
-                    value: `${model.provider}/${model.id}`,
-                    label: `${model.provider}/${model.id}`,
-                    description: model.name,
-                }));
-                choices.unshift({ value: "off", label: "Use current model", description: current ? `Clear ${current}` : "No default override" });
+                const choices = models.map((model) => `${model.name} (${model.provider}/${model.id})`);
+                const modelByChoice = new Map(models.map((model) => [`${model.name} (${model.provider}/${model.id})`, `${model.provider}/${model.id}`]));
+                choices.unshift("Use current model");
                 if (!ctx.hasUI || typeof ctx.ui.select !== "function") {
                     ctx.ui.notify(`Default IPython sub-agent model: ${current ?? "current session model"}. Run /ipython-subagent provider/model or /ipython-subagent off to change it.`, "info");
                     return;
@@ -311,8 +308,9 @@ function bindExtension(pi, subagent, registerStop) {
                 const selected = await ctx.ui.select("Default IPython sub-agent model", choices);
                 if (selected === undefined)
                     return;
-                live.setDefaultSubagentModel(selected === "off" ? undefined : selected);
-                ctx.ui.notify(selected === "off" ? "Default sub-agent model cleared." : `Default IPython sub-agent model: ${selected}`, "info");
+                const selector = modelByChoice.get(selected);
+                live.setDefaultSubagentModel(selector);
+                ctx.ui.notify(selector ? `Default IPython sub-agent model: ${selector}` : "Default sub-agent model cleared.", "info");
             },
         });
         pi.registerShortcut("ctrl+alt+s", {
