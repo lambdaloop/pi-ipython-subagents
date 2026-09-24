@@ -448,9 +448,11 @@ export class SessionKernel {
                     void this.closeKernel(new Error(`Kernel shell channel failed: ${errorMessage(error)}`));
                 }
             });
-            const cell = await result;
-            await reply;
-            return cell;
+            // IOPub's idle status is the execution-complete signal. The shell
+            // reply is still consumed and tracked above (and the next request
+            // waits for it), but waiting for a separate socket here can keep a
+            // completed cell looking hung when the kernel is under load.
+            return await result;
         }
         catch (error) {
             if (timedOut) {

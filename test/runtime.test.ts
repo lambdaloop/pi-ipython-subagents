@@ -858,6 +858,38 @@ test("an explicit interpreter overrides the automatic pixi default", () => {
 	}
 });
 
+test("an IOPub idle event completes a cell without waiting for the shell reply", async () => {
+	let requestMsgId;
+	const kernel = new SessionKernel({});
+	kernel.connection = { key: "" };
+	kernel.shell = {
+		send: async (frames) => {
+			requestMsgId = JSON.parse(frames[2].toString()).msg_id;
+		},
+		receive: () => new Promise(() => {}),
+	};
+
+	const execution = kernel.runCell("print('hello')", undefined, undefined, undefined, false);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(typeof requestMsgId, "string");
+	kernel.handleExecutionMessage({
+		header: { msg_type: "stream" },
+		parent_header: { msg_id: requestMsgId },
+		content: { name: "stdout", text: "hello\n" },
+	});
+	kernel.handleExecutionMessage({
+		header: { msg_type: "status" },
+		parent_header: { msg_id: requestMsgId },
+		content: { execution_state: "idle" },
+	});
+
+	const result = await Promise.race([
+		execution,
+		new Promise((_, reject) => setTimeout(() => reject(new Error("cell waited for shell reply")), 100)),
+	]);
+	assert.equal(result.stdout, "hello\n");
+});
+
 test("interrupting an awaited cell leaves the IPython kernel usable", async () => {
 	const kernels = createKernelRuntime({ cwd: process.cwd(), runtimeDir: join(process.cwd(), "python") });
 	const kernel = new SessionKernel(kernels);
