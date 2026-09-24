@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { getAgentDir, getSelectListTheme } from "@earendil-works/pi-coding-agent";
+import { Container, fuzzyFilter, getKeybindings, Input, SelectList, Spacer, Text, Key, matchesKey } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { buildPiRlmRuntimePrompt } from "./prompt.js";
 import { createIpythonRenderers } from "./render.js";
@@ -300,26 +300,79 @@ function bindExtension(pi, subagent, registerStop) {
                 const models = ctx.modelRegistry.getAvailable();
                 const scopedSelectors = new Set(ctx.scopedModels.map(({ model }) => `${model.provider}/${model.id}`));
                 const current = live.getDefaultSubagentModel();
-                const choices = models.map((model) => {
-                    const selector = `${model.provider}/${model.id}`;
-                    const name = model.name || model.id;
-                    return `${name} (${selector})${scopedSelectors.has(selector) ? " · Ctrl+P" : ""}`;
-                });
-                const modelByChoice = new Map(models.map((model) => {
-                    const selector = `${model.provider}/${model.id}`;
-                    const name = model.name || model.id;
-                    return [`${name} (${selector})${scopedSelectors.has(selector) ? " · Ctrl+P" : ""}`, selector];
-                }));
-                choices.unshift("Use current model");
                 if (!ctx.hasUI || typeof ctx.ui.select !== "function") {
                     ctx.ui.notify(`Default IPython sub-agent model: ${current ?? "current session model"}. Run /ipython-subagent provider/model or /ipython-subagent off to change it.`, "info");
                     return;
                 }
-                const selected = await ctx.ui.select("Default IPython sub-agent model", choices);
+                const items = [
+                    { value: "", label: "Use current model" },
+                    ...models.map((model) => {
+                        const selector = `${model.provider}/${model.id}`;
+                        const scoped = scopedSelectors.has(selector) ? " · Ctrl+P" : "";
+                        return { value: selector, label: model.name || model.id, description: `${selector}${scoped}` };
+                    }),
+                ];
+                const fallbackChoices = ["Use current model", ...models.map((model) => {
+                    const selector = `${model.provider}/${model.id}`;
+                    const name = model.name || model.id;
+                    return `${name} (${selector})${scopedSelectors.has(selector) ? " · Ctrl+P" : ""}`;
+                })];
+                const selected = typeof ctx.ui.custom === "function" && ctx.mode === "tui"
+                    ? await ctx.ui.custom((tui, theme, _keybindings, done) => {
+                        const container = new Container();
+                        const search = new Input({ placeholder: "Search models…" });
+                        let filtered = items;
+                        let list;
+                        const createList = () => {
+                            const currentIndex = filtered.findIndex(({ value }) => value === (current ?? ""));
+                            list = new SelectList(filtered, 10, getSelectListTheme());
+                            if (currentIndex >= 0)
+                                list.setSelectedIndex(currentIndex);
+                            list.onSelect = (item) => done(item.value);
+                            list.onCancel = () => done(undefined);
+                            container.clear();
+                            container.addChild(new Text(theme.fg("accent", "Default IPython sub-agent model"), 0, 0));
+                            container.addChild(new Spacer(1));
+                            container.addChild(search);
+                            container.addChild(new Spacer(1));
+                            container.addChild(list);
+                        };
+                        const filter = () => {
+                            const query = search.getValue();
+                            filtered = query ? fuzzyFilter(items, query, (item) => `${item.label} ${item.description ?? ""}`) : items;
+                            createList();
+                            tui.requestRender();
+                        };
+                        search.onSubmit = () => list.getSelectedItem() && done(list.getSelectedItem().value);
+                        createList();
+                        return {
+                            render: (width) => container.render(width),
+                            invalidate: () => container.invalidate(),
+                            handleInput: (data) => {
+                                const kb = getKeybindings();
+                                if (kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down"))
+                                    list.handleInput(data);
+                                else if (kb.matches(data, "tui.select.confirm"))
+                                    list.getSelectedItem() && done(list.getSelectedItem().value);
+                                else if (kb.matches(data, "tui.select.cancel"))
+                                    done(undefined);
+                                else {
+                                    search.handleInput(data);
+                                    filter();
+                                }
+                            },
+                        };
+                    })
+                    : await ctx.ui.select("Default IPython sub-agent model", fallbackChoices);
                 if (selected === undefined)
                     return;
-                const selector = modelByChoice.get(selected);
-                live.setDefaultSubagentModel(selector);
+                const fallbackIndex = fallbackChoices.indexOf(selected);
+                const selector = fallbackIndex > 0
+                    ? items[fallbackIndex]?.value ?? ""
+                    : typeof selected === "string" && selected.includes("/")
+                        ? items.find(({ value }) => value === selected)?.value ?? ""
+                        : "";
+                live.setDefaultSubagentModel(selector || undefined);
                 ctx.ui.notify(selector ? `Default IPython sub-agent model: ${selector}` : "Default sub-agent model cleared.", "info");
             },
         });
