@@ -282,6 +282,40 @@ function bindExtension(pi, subagent, registerStop) {
             description: "Browse a live RLM sub-agent or background task transcript",
             handler: async (args, ctx) => browseSubagent(ctx, runtimeFor(ctx), args),
         });
+        pi.registerCommand("ipython-subagent", {
+            description: "Choose the default model for IPython sub-agents",
+            handler: async (args, ctx) => {
+                const live = runtimeFor(ctx);
+                const requested = args.trim();
+                if (requested.toLowerCase() === "off" || requested.toLowerCase() === "reset") {
+                    live.setDefaultSubagentModel(undefined);
+                    ctx.ui.notify("Default sub-agent model cleared; sub-agents will inherit the current model.", "info");
+                    return;
+                }
+                if (requested) {
+                    live.setDefaultSubagentModel(requested);
+                    ctx.ui.notify(`Default IPython sub-agent model: ${requested}`, "info");
+                    return;
+                }
+                const models = ctx.scopedModels.length ? ctx.scopedModels.map(({ model }) => model) : ctx.modelRegistry.getAvailable();
+                const current = live.getDefaultSubagentModel();
+                const choices = models.map((model) => ({
+                    value: `${model.provider}/${model.id}`,
+                    label: `${model.provider}/${model.id}`,
+                    description: model.name,
+                }));
+                choices.unshift({ value: "off", label: "Use current model", description: current ? `Clear ${current}` : "No default override" });
+                if (!ctx.hasUI || typeof ctx.ui.select !== "function") {
+                    ctx.ui.notify(`Default IPython sub-agent model: ${current ?? "current session model"}. Run /ipython-subagent provider/model or /ipython-subagent off to change it.`, "info");
+                    return;
+                }
+                const selected = await ctx.ui.select("Default IPython sub-agent model", choices);
+                if (selected === undefined)
+                    return;
+                live.setDefaultSubagentModel(selected === "off" ? undefined : selected);
+                ctx.ui.notify(selected === "off" ? "Default sub-agent model cleared." : `Default IPython sub-agent model: ${selected}`, "info");
+            },
+        });
         pi.registerShortcut("ctrl+alt+s", {
             description: "Browse a live RLM sub-agent or background task transcript",
             handler: async (ctx) => browseSubagent(ctx, runtimeFor(ctx)),
@@ -399,6 +433,7 @@ function bindExtension(pi, subagent, registerStop) {
             messagesPath: ctx.sessionManager.getSessionFile() ?? "not persisted",
             depth: live.depth,
             maxDepth: live.maxDepth,
+            ...(!subagent && live.getDefaultSubagentModel() ? { defaultSubagentModel: live.getDefaultSubagentModel() } : {}),
             ...(subagent ? { parentName: subagent.parent.name } : {}),
         });
         return {

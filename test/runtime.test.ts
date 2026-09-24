@@ -21,6 +21,8 @@ function mockPi() {
 	let active = ["read", "bash", "edit", "write"];
 	const tools = [];
 	const shortcuts = new Map();
+	const commands = new Map();
+	const entries = [];
 	const pi = {
 		registerFlag(name, options) {
 			flags.set(name, options.default);
@@ -28,7 +30,9 @@ function mockPi() {
 		getFlag(name) {
 			return flags.get(name);
 		},
-		registerCommand() {},
+		registerCommand(name, options) {
+			commands.set(name, options);
+		},
 		registerShortcut(name, options) {
 			shortcuts.set(name, options);
 		},
@@ -44,11 +48,14 @@ function mockPi() {
 		setActiveTools(names) {
 			active = [...names];
 		},
+		appendEntry(customType, data) {
+			entries.push({ type: "custom", customType, data });
+		},
 		on(name, handler) {
 			events.set(name, handler);
 		},
 	};
-	return { pi, events, flags, tools, shortcuts, get active() { return active; } };
+	return { pi, events, flags, tools, shortcuts, commands, entries, get active() { return active; } };
 }
 
 test("RLM is enabled by default and routes shell work through IPython", async () => {
@@ -89,6 +96,8 @@ test("sub-agent policy leaves only ipython and the prompt distinguishes session 
 	assert.match(mainPrompt, /rg_search\(\.\.\.\)/);
 	assert.match(mainPrompt, /Never search .* as roots/);
 	assert.match(mainPrompt, /agent_message\.force_send/);
+	assert.match(mainPrompt, /Use the default IPython sub-agent model \(the current session model\)/);
+	assert.match(mainPrompt, /user explicitly requests\/recommends it/);
 	assert.match(subPrompt, /agent_message\.force_send/);
 	assert.match(subPrompt, /Never search .* as roots/);
 	assert.match(mainPrompt, /20 seconds by default/);
@@ -99,6 +108,39 @@ test("sub-agent policy leaves only ipython and the prompt distinguishes session 
 	assert.doesNotMatch(subPrompt, /parent session keeps its full tool set/);
 	assert.match(BOOTSTRAP, /rg_files/);
 	assert.match(BOOTSTRAP, /rg_search/);
+});
+
+test("/ipython-subagent sets and persists a default model", async () => {
+	const mock = mockPi();
+	piRlmRuntime(mock.pi);
+	const models = [
+		{ provider: "test", id: "fast", name: "Fast model" },
+		{ provider: "test", id: "strong", name: "Strong model" },
+	];
+	const notices = [];
+	const ctx = {
+		cwd: "/tmp",
+		hasUI: false,
+		mode: "print",
+		scopedModels: [],
+		modelRegistry: {
+			getAvailable: () => models,
+			find: (provider, id) => models.find((model) => model.provider === provider && model.id === id),
+		},
+		sessionManager: {
+			getBranch: () => [],
+			getSessionId: () => "default-model-test",
+			getSessionFile: () => undefined,
+		},
+		ui: { setWidget() {}, notify: (message) => notices.push(message) },
+	};
+	const command = mock.commands.get("ipython-subagent");
+	await command.handler("test/strong", ctx);
+	assert.equal(mock.entries.at(-1).data.model, "test/strong");
+	assert.match(notices.at(-1), /test\/strong/);
+	await command.handler("off", ctx);
+	assert.equal(mock.entries.at(-1).data.model, null);
+	await mock.events.get("session_shutdown")({}, ctx);
 });
 
 test("RLM appends its prompt and shuts down cleanly", async () => {

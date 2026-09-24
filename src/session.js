@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { createKernelRuntime, SessionKernel, verifyKernelEnvironment, } from "./kernel.js";
 import { BackgroundTasks } from "./background.js";
-import { loadSubagents, SUBAGENT_ENTRY, subagentCreated, subagentDeleted } from "./state.js";
+import { defaultSubagentModel, loadDefaultSubagentModel, loadSubagents, SUBAGENT_ENTRY, subagentCreated, subagentDeleted, DEFAULT_SUBAGENT_MODEL_ENTRY } from "./state.js";
 import { startSubagent, } from "./subagent.js";
 const AGENT_MESSAGE_TYPE = "pi-rlm-runtime.message";
 export const RLM_USAGE_ENTRY = "pi-rlm-runtime.usage";
@@ -20,11 +20,13 @@ export class SessionRuntime {
     tasks;
     starting = new Set();
     reservedNames = new Set();
+    defaultModelSelector;
     tempDir;
     closed = false;
     constructor(options) {
         this.options = options;
         this.ctx = options.ctx;
+        this.defaultModelSelector = loadDefaultSubagentModel(options.ctx.sessionManager.getBranch(), this.sessionId);
         this.kernels = options.runtime ?? createKernelRuntime({ cwd: options.ctx.cwd, runtimeDir: options.runtimeDir });
         this.tasks = new BackgroundTasks({
             cwd: options.ctx.cwd,
@@ -51,6 +53,15 @@ export class SessionRuntime {
     }
     updateContext(ctx) {
         this.ctx = ctx;
+    }
+    getDefaultSubagentModel() {
+        return this.defaultModelSelector;
+    }
+    setDefaultSubagentModel(selector) {
+        if (selector && !sessionModels(this.ctx).some(({ provider, id }) => `${provider}/${id}` === selector))
+            throw new Error(`Sub-agent model is unavailable: ${selector}`);
+        this.defaultModelSelector = selector;
+        this.options.pi.appendEntry(DEFAULT_SUBAGENT_MODEL_ENTRY, defaultSubagentModel(this.sessionId, selector));
     }
     listSubagents() {
         return sortedSubagents(this.subagents.values()).map(subagentInfo);
@@ -166,6 +177,7 @@ export class SessionRuntime {
         this.open();
         this.ctx = ctx;
         const saved = loadSubagents(ctx.sessionManager.getBranch(), this.sessionId);
+        this.defaultModelSelector = loadDefaultSubagentModel(ctx.sessionManager.getBranch(), this.sessionId);
         const removed = [];
         for (const [id, subagent] of this.subagents) {
             if (saved.has(id))
@@ -418,11 +430,12 @@ export class SessionRuntime {
     async spawn(prompt, subagentName, modelSelector, signal) {
         if (this.depth >= this.maxDepth)
             throw new Error(`Sub-agent depth limit reached (${this.depth}/${this.maxDepth})`);
+        const selectedModel = modelSelector ?? this.defaultModelSelector;
         let model = this.ctx.model;
-        if (modelSelector) {
-            model = sessionModels(this.ctx).find(({ provider, id }) => `${provider}/${id}` === modelSelector);
+        if (selectedModel) {
+            model = sessionModels(this.ctx).find(({ provider, id }) => `${provider}/${id}` === selectedModel);
             if (!model)
-                throw new Error(`Sub-agent model is unavailable: ${modelSelector}`);
+                throw new Error(`Sub-agent model is unavailable: ${selectedModel}`);
         }
         if (!model)
             throw new Error("Select a Pi model before creating a sub-agent");

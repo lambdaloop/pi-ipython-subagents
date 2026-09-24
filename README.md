@@ -25,7 +25,7 @@ Review this codebase. Use sub-agents to inspect the architecture, runtime,
 and tests in parallel, then reconcile their findings.
 ```
 
-The runtime gives the main agent a persistent working environment and the ability to create, message, inspect, and stop sub-agents. The main agent keeps native Pi tools except the shell tools (`bash` and `powershell`) alongside `ipython`; use IPython for shell commands, file work, and project tools. RLM sub-agents receive only `ipython` directly. Each sub-agent has its own Pi conversation and state, shares the project directory, and inherits the parent model unless another is selected.
+The runtime gives the main agent a persistent working environment and the ability to create, message, inspect, and stop sub-agents. The main agent keeps native Pi tools except the shell tools (`bash` and `powershell`) alongside `ipython`; use IPython for shell commands, file work, and project tools. RLM sub-agents receive only `ipython` directly. Each sub-agent has its own Pi conversation and state and shares the project directory. By default, sub-agents use the parent session's current model; you can configure a persistent default for this session with `/ipython-subagent`.
 
 Sub-agents may create further sub-agents. Set the recursion limit when starting Pi:
 
@@ -38,6 +38,16 @@ The default depth is 4. The supported range is 0–16.
 ## View active sub-agents
 
 Active sub-agents appear as a nested tree above the editor. Press `Ctrl+Alt+A` or run `/subagents` to expand or collapse it. When expanded, the tree also shows each RLM sub-agent's current tool, command, and latest output. Dormant sub-agents are hidden, and expanded trees are capped at 12 agents. Press `Shift+↑`/`Shift+↓` to select the previous or next active sub-agent or background task; press `Enter` to browse the selected transcript in a live scrolling overlay. Use `/subagent` (or `Ctrl+Alt+S`) to choose one interactively, or pass a name as `/subagent NAME` to open it directly.
+
+## Default sub-agent model
+
+Run `/ipython-subagent` to choose a default model from the models available in the current session. Or set one directly with its exact `provider/model-id` selector:
+
+```text
+/ipython-subagent provider/model-id
+```
+
+Run `/ipython-subagent off` to clear the override and return to inheriting the current session model. An explicit `model=` passed to `rlm()` always takes precedence over the configured default.
 
 ## Agent API
 

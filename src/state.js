@@ -1,5 +1,6 @@
 export const SUBAGENT_ENTRY = "pi-rlm-runtime.subagent";
 export const NODE_ENTRY = "pi-rlm-runtime.node";
+export const DEFAULT_SUBAGENT_MODEL_ENTRY = "pi-rlm-runtime.default-subagent-model";
 export const MAX_DEPTH = 16;
 export function loadSubagents(entries, ownerSessionId) {
     const subagents = new Map();
@@ -21,6 +22,20 @@ export function loadSubagents(entries, ownerSessionId) {
         }
     }
     return subagents;
+}
+export function loadDefaultSubagentModel(entries, sessionId) {
+    for (let index = entries.length - 1; index >= 0; index--) {
+        const entry = entries[index];
+        if (entry?.type !== "custom" || entry.customType !== DEFAULT_SUBAGENT_MODEL_ENTRY || !entry.data || typeof entry.data !== "object")
+            continue;
+        const value = entry.data;
+        if (value.version === 1 && value.sessionId === sessionId && (typeof value.model === "string" || value.model === null))
+            return value.model ?? undefined;
+    }
+    return undefined;
+}
+export function defaultSubagentModel(sessionId, model) {
+    return { version: 1, sessionId, model: model ?? null };
 }
 export function loadRecursion(entries, sessionId, fallback) {
     for (let index = entries.length - 1; index >= 0; index--) {
