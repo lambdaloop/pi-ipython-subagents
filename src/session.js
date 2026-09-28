@@ -444,64 +444,125 @@ export class SessionRuntime {
         }
         if (subagentName)
             this.reservedNames.add(subagentName);
+
+        const startupController = new AbortController();
+        const abortStartup = () => startupController.abort();
+        signal?.addEventListener("abort", abortStartup, { once: true });
+        if (signal?.aborted)
+            startupController.abort();
+
+        let resolvePrepared;
+        let rejectPrepared;
+        const prepared = new Promise((resolve, reject) => {
+            resolvePrepared = resolve;
+            rejectPrepared = reject;
+        });
+        let preparedInfo;
+        let subagent;
         let started;
-        try {
-            started = await startSubagent({
-                cwd: this.ctx.cwd,
-                agentDir: this.options.agentDir,
-                subagentDir: this.subagentDir(),
-                projectTrusted: this.ctx.isProjectTrusted(),
-                model,
-                ...(this.ctx.thinkingLevel ? { thinkingLevel: this.ctx.thinkingLevel } : {}),
-                runtime: this.kernels,
-                depth: this.depth + 1,
-                maxDepth: this.maxDepth,
-                parent: this.parentLink(),
-                ...(subagentName ? { name: subagentName } : {}),
-                task: prompt,
-                signal,
-                makeExtension: this.options.makeExtension,
-            });
-            if (signal.aborted)
-                throw abortErr();
-            if (this.closed)
-                throw new Error("Parent session closed while sub-agent was starting");
-            const subagent = {
-                sessionId: started.sessionId,
-                name: started.name,
-                ...(started.sessionFile ? { sessionFile: started.sessionFile } : {}),
-                model: started.model,
-                agent: started,
+        let opening;
+        const onPrepared = ({ sessionId, name, sessionFile }) => {
+            if (subagent)
+                return;
+            subagent = {
+                sessionId,
+                name,
+                ...(sessionFile ? { sessionFile } : {}),
+                model: `${model.provider}/${model.id}`,
+                starting: true,
             };
-            this.subagents.set(subagent.sessionId, subagent);
-            this.attach(subagent, started);
-            const run = started.prompt(prompt, signal);
+            this.subagents.set(sessionId, subagent);
+            subagent.opening = opening;
+            this.options.pi.appendEntry(SUBAGENT_ENTRY, subagentCreated(this.sessionId, subagent));
+            preparedInfo = subagentInfo(subagent);
+            resolvePrepared(preparedInfo);
+            this.notifySubagents();
+        };
+        const launchSubagent = this.options.startSubagent ?? startSubagent;
+        opening = Promise.resolve()
+            .then(() => launchSubagent({
+            cwd: this.ctx.cwd,
+            agentDir: this.options.agentDir,
+            subagentDir: this.subagentDir(),
+            projectTrusted: this.ctx.isProjectTrusted(),
+            model,
+            ...(this.ctx.thinkingLevel ? { thinkingLevel: this.ctx.thinkingLevel } : {}),
+            runtime: this.kernels,
+            depth: this.depth + 1,
+            maxDepth: this.maxDepth,
+            parent: this.parentLink(),
+            ...(subagentName ? { name: subagentName } : {}),
+            task: prompt,
+            signal: startupController.signal,
+            onPrepared,
+            makeExtension: this.options.makeExtension,
+        }))
+            .then(async (agent) => {
+            started = agent;
+            if (!subagent) {
+                onPrepared({ sessionId: agent.sessionId, name: agent.name, sessionFile: agent.sessionFile });
+            }
+            if (startupController.signal.aborted)
+                throw abortErr();
+            if (this.closed || this.subagents.get(subagent.sessionId) !== subagent)
+                throw new Error("Parent session closed while sub-agent was starting");
+            subagent.sessionFile = agent.sessionFile ?? subagent.sessionFile;
+            subagent.model = agent.model;
+            this.attach(subagent, agent);
+            const run = agent.prompt(prompt, startupController.signal);
             const subagentRun = { finished: run.finished, replied: false };
             subagent.run = subagentRun;
             void run.finished.catch(() => undefined);
             await run.accepted;
-            if (signal.aborted)
+            if (startupController.signal.aborted)
                 throw abortErr();
-            if (this.closed)
+            if (this.closed || this.subagents.get(subagent.sessionId) !== subagent)
                 throw new Error("Parent session closed while sub-agent was starting");
-            this.options.pi.appendEntry(SUBAGENT_ENTRY, subagentCreated(this.sessionId, subagent));
+            delete subagent.starting;
             this.watch(subagent, subagentRun);
+            this.notifySubagents();
             return subagentInfo(subagent);
-        }
-        catch (error) {
-            if (started) {
-                const subagent = this.subagents.get(started.sessionId);
-                if (subagent?.agent === started)
-                    subagent.unsubscribe?.();
-                this.subagents.delete(started.sessionId);
-                await started.close().catch(() => undefined);
-                if (started.sessionFile)
-                    rmSync(started.sessionFile, { force: true });
+        })
+            .catch(async (error) => {
+            rejectPrepared(error);
+            if (subagent && this.subagents.get(subagent.sessionId) === subagent) {
+                subagent.unsubscribe?.();
+                this.subagents.delete(subagent.sessionId);
+                this.options.pi.appendEntry(SUBAGENT_ENTRY, subagentDeleted(this.sessionId, subagent.sessionId));
                 this.notifySubagents();
+                if (preparedInfo && !this.closed) {
+                    this.here(`Sub-agent failed to start: ${errorMessage(error)}`, {
+                        id: subagent.sessionId,
+                        name: subagent.name,
+                        depth: this.depth + 1,
+                    });
+                }
             }
+            if (started)
+                await started.close().catch(() => undefined);
+            if (subagent?.sessionFile)
+                rmSync(subagent.sessionFile, { force: true });
             throw error;
+        });
+        if (subagent)
+            subagent.opening = opening;
+        const clearOpening = () => {
+            if (subagent?.opening === opening)
+                delete subagent.opening;
+        };
+        void opening.then(clearOpening, clearOpening);
+        void opening.catch(() => undefined);
+
+        try {
+            const info = await prepared;
+            if (signal?.aborted) {
+                startupController.abort();
+                throw abortErr();
+            }
+            return info;
         }
         finally {
+            signal?.removeEventListener("abort", abortStartup);
             if (subagentName)
                 this.reservedNames.delete(subagentName);
         }
@@ -1049,7 +1110,9 @@ function runningSubagentInfo(subagent) {
     };
 }
 function status(subagent) {
-    return subagent.agent ? (subagent.agent.session.isStreaming ? "running" : "idle") : "dormant";
+    return subagent.agent
+        ? (subagent.agent.session.isStreaming ? "running" : "idle")
+        : subagent.starting || subagent.opening ? "running" : "dormant";
 }
 function sortedSubagents(subagents) {
     return [...subagents].sort((left, right) => left.name.localeCompare(right.name));

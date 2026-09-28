@@ -71,7 +71,7 @@ await agent_message.send(
 await rlm.delete_subagent(reviewer)
 ```
 
-`rlm()` returns when the sub-agent starts. Messages and shared files carry results back without copying the sub-agent's full context into its parent. If a sub-agent exits without sending a message, its final response or error is forwarded automatically.
+`rlm()` returns as soon as the sub-agent session is allocated; setup and its initial turn continue in the background, so submitting a long prompt does not block the parent cell on startup. Messages and shared files carry results back without copying the sub-agent's full context into its parent. If startup fails or a sub-agent exits without sending a message, its error or final response is forwarded automatically.
 
 `rlm.find_models()` searches the authenticated models available to Pi. Its selectors are exact; requesting an unavailable model fails instead of choosing a fallback.
 

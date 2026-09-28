@@ -53,6 +53,7 @@ export async function startSubagent(options) {
     let session;
     let bound = false;
     try {
+        options.onPrepared?.({ sessionId, name, sessionFile: sessions.getSessionFile() });
         const services = await createAgentSessionServices({
             cwd: options.cwd,
             agentDir: options.agentDir,
@@ -174,7 +175,10 @@ function runPrompt(session, prompt, signal) {
     return { accepted, finished };
 }
 function defaultName(prompt, sessionId) {
+    // Names only use a short prefix; avoid normalizing and slugifying an entire
+    // potentially large task prompt just to create a display label.
     const slug = prompt
+        .slice(0, 512)
         .normalize("NFKD")
         .replace(/[\u0300-\u036f]/g, "")
         .toLowerCase()

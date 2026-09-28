@@ -953,6 +953,47 @@ function runtimeWith(kernels) {
 	});
 }
 
+test("sub-agent submission returns before child startup finishes", async () => {
+	const runtime = runtimeWith(stubKernels());
+	const model = { provider: "test-provider", id: "test-model" };
+	runtime.ctx.model = model;
+	runtime.ctx.modelRegistry = { getAvailable: () => [model] };
+	runtime.ctx.isProjectTrusted = () => true;
+	runtime.options.pi = { appendEntry() {}, sendMessage() {} };
+
+	let finishStartup;
+	let launchOptions;
+	runtime.options.startSubagent = (options) => {
+		launchOptions = options;
+		options.onPrepared({ sessionId: "child-id", name: "large-task-child", sessionFile: "/tmp/child.json" });
+		return new Promise((resolve) => { finishStartup = resolve; });
+	};
+
+	try {
+		const result = await Promise.race([
+			runtime.spawn("task text ".repeat(20_000), undefined, undefined, new AbortController().signal),
+			new Promise((_, reject) => setTimeout(() => reject(new Error("submission waited for child startup")), 100)),
+		]);
+		assert.equal(result.id, "child-id");
+		assert.equal(runtime.listSubagents()[0].status, "running");
+		assert.equal(typeof finishStartup, "function");
+
+		finishStartup({
+			sessionId: "child-id",
+			name: "large-task-child",
+			sessionFile: "/tmp/child.json",
+			model: "test-provider/test-model",
+			session: { isStreaming: true, messages: [], subscribe: () => () => {} },
+			prompt: () => ({ accepted: Promise.resolve(), finished: new Promise(() => {}) }),
+			close: async () => {},
+		});
+		await runtime.subagents.get("child-id").opening;
+		assert.equal(launchOptions.task.length, 200_000);
+	} finally {
+		await runtime.dispose();
+	}
+});
+
 test("sub-agents stay alive while descendants are running", async () => {
 	const runtime = runtimeWith(stubKernels());
 	let closed = 0;
