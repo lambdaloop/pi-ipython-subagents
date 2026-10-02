@@ -1,6 +1,6 @@
 {
 	"name": "@lambdaloop/pi-ipython-subagents",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"description": "Recursive language model runtime for Pi",
 	"repository": {
 		"type": "git",
@@ -30,11 +30,11 @@
 		"prepack": "npm run build"
 	},
 	"dependencies": {
-		"@earendil-works/pi-tui": "^0.85.1",
 		"zeromq": "^6.5.0"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
 		"typebox": "*"
 	},
 	"devDependencies": {
